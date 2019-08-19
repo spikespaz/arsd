@@ -263,6 +263,10 @@ abstract class ComboboxBase : Widget {
 	private string[] options;
 	private int selection = -1;
 
+    string[] getOptions() {
+        return options;
+    }
+
     string currentText() {
         return options[selection];
     }
