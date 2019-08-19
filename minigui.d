@@ -818,10 +818,8 @@ mixin template LayoutInfo() {
 	int widthStretchiness() { return _widthStretchiness; }
 	int heightStretchiness() { return _heightStretchiness; }
 
-    void setMaxSize(int w, int h) {
-        _maxWidth = w;
-        _maxHeight = h;
-    }
+    void setMaxWidth(int value) { _maxWidth = value; }
+    void setMaxHeight(int value) { _maxHeight = value; }
     void setStretchiness(int ws, int hs) {
         _widthStretchiness = ws;
         _heightStretchiness = hs;
@@ -5316,6 +5314,7 @@ class Button : MouseActivatedWidget {
 		createWin32Window(this, "button"w, label, BS_PUSHBUTTON);
 
 		this.label = label;
+        this._maxHeight = Window.lineHeight + 4;
 	}
 	else version(custom_widgets)
 	this(string label, Widget parent = null) {
@@ -5327,6 +5326,7 @@ class Button : MouseActivatedWidget {
 		depressedBgColor = depressedButtonColor;
 
 		this.label = label;
+        this._maxHeight = Window.lineHeight + 4;
 	}
 	else static assert(false);
 
