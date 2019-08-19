@@ -5554,7 +5554,7 @@ class TextLabel : Widget {
 	///
 	this(string label, Widget parent = null) {
 		this.label_ = label;
-		this.alignment = TextAlignment.Right;
+		this.alignment = TextAlignment.Left;
 		this.tabStop = false;
 		super(parent);
 	}
