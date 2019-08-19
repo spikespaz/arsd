@@ -263,6 +263,10 @@ abstract class ComboboxBase : Widget {
 	private string[] options;
 	private int selection = -1;
 
+    string currentText() {
+        return options[selection];
+    }
+
 	void addOption(string s) {
 		options ~= s;
 		version(win32_widgets)
@@ -1153,6 +1157,12 @@ extern(Windows) BOOL childHandler(HWND hwnd, LPARAM lparam) {
 */
 class Widget {
 	mixin LayoutInfo!();
+
+    ///
+    @scriptable
+    void setEnabled(bool yes) {
+        EnableWindow(this.hwnd, yes);
+    }
 
 	///
 	@scriptable
