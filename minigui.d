@@ -263,6 +263,17 @@ abstract class ComboboxBase : Widget {
 	private string[] options;
 	private int selection = -1;
 
+    string[] getOptions() {
+        return options;
+    }
+
+    string currentText() {
+        if (selection >= 0 && selection + 1 <= options.length)
+            return options[selection];
+
+        return "";
+    }
+
 	void addOption(string s) {
 		options ~= s;
 		version(win32_widgets)
@@ -793,6 +804,14 @@ mixin template Margin(string code) {
 
 
 mixin template LayoutInfo() {
+    private int
+        _maxWidth = int.max, _maxHeight = int.max,
+        _widthStretchiness = 4, _heightStretchiness = 4,
+        _marginLeft = 0, _marginRight = 0,
+        _marginTop = 0, _marginBottom = 0,
+        _paddingLeft = 0, _paddingRight = 0,
+        _paddingTop = 0, _paddingBottom = 0;
+
 	int minWidth() { return 0; }
 	int minHeight() {
 		// default widgets have a vertical layout, therefore the minimum height is the sum of the contents
@@ -805,19 +824,39 @@ mixin template LayoutInfo() {
 
 		return sum;
 	}
-	int maxWidth() { return int.max; }
-	int maxHeight() { return int.max; }
-	int widthStretchiness() { return 4; }
-	int heightStretchiness() { return 4; }
+	int maxWidth() { return _maxWidth; }
+	int maxHeight() { return _maxHeight; }
+	int widthStretchiness() { return _widthStretchiness; }
+	int heightStretchiness() { return _heightStretchiness; }
 
-	int marginLeft() { return 0; }
-	int marginRight() { return 0; }
-	int marginTop() { return 0; }
-	int marginBottom() { return 0; }
-	int paddingLeft() { return 0; }
-	int paddingRight() { return 0; }
-	int paddingTop() { return 0; }
-	int paddingBottom() { return 0; }
+    void setMaxWidth(int value) { _maxWidth = value; }
+    void setMaxHeight(int value) { _maxHeight = value; }
+    void setStretchiness(int ws, int hs) {
+        _widthStretchiness = ws;
+        _heightStretchiness = hs;
+    }
+
+	int marginLeft() { return _marginLeft; }
+	int marginRight() { return _marginRight; }
+	int marginTop() { return _marginTop; }
+	int marginBottom() { return _marginBottom; }
+	int paddingLeft() { return _paddingLeft; }
+	int paddingRight() { return _paddingRight; }
+	int paddingTop() { return _paddingTop; }
+	int paddingBottom() { return _paddingBottom; }
+
+    void setMargins(int top, int left, int bottom, int right) {
+        _marginTop = top;
+        _marginLeft = left;
+        _marginBottom = bottom;
+        _marginRight = right;
+    }
+    void setPadding(int top, int left, int bottom, int right) {
+        _paddingTop = top;
+        _paddingLeft = left;
+        _paddingBottom = bottom;
+        _paddingRight = right;
+    }
 	//LinePreference linePreference() { return LinePreference.PreferOwnLine; }
 
 	void recomputeChildLayout() {
@@ -1125,6 +1164,12 @@ extern(Windows) BOOL childHandler(HWND hwnd, LPARAM lparam) {
 */
 class Widget {
 	mixin LayoutInfo!();
+
+    ///
+    @scriptable
+    void setEnabled(bool yes) {
+        EnableWindow(this.hwnd, yes);
+    }
 
 	///
 	@scriptable
@@ -5286,6 +5331,7 @@ class Button : MouseActivatedWidget {
 		createWin32Window(this, "button"w, label, BS_PUSHBUTTON);
 
 		this.label = label;
+        this._maxHeight = Window.lineHeight + 4;
 	}
 	else version(custom_widgets)
 	this(string label, Widget parent = null) {
@@ -5297,6 +5343,7 @@ class Button : MouseActivatedWidget {
 		depressedBgColor = depressedButtonColor;
 
 		this.label = label;
+        this._maxHeight = Window.lineHeight + 4;
 	}
 	else static assert(false);
 
@@ -5514,7 +5561,7 @@ class TextLabel : Widget {
 	///
 	this(string label, Widget parent = null) {
 		this.label_ = label;
-		this.alignment = TextAlignment.Right;
+		this.alignment = TextAlignment.Left;
 		this.tabStop = false;
 		super(parent);
 	}
