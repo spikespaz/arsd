@@ -871,6 +871,15 @@ interface MemoryImage {
 		}
 	}
 
+    static MemoryImage fromData(const ubyte[] data) @trusted {
+        static if (__traits(compiles, (){import arsd.image;})) {
+            import arsd.image;
+            return loadImageFromMemory(data);
+		} else {
+			static assert(0, "please provide 'arsd.image' to load images!");
+		}
+    }
+
 	// ***This method is deliberately not publicly documented.***
 	// What it does is unconditionally frees internal image storage, without any sanity checks.
 	// If you will do this, make sure that you have no references to image data left (like
