@@ -2922,6 +2922,8 @@ class TabWidget : Widget {
 	this(Widget parent) {
 		super(parent);
 
+        this.setMargins(4, 0, 4, 0);
+
 		version(win32_widgets) {
 			createWin32Window(this, WC_TABCONTROL, "", 0);
 		} else version(custom_widgets) {
@@ -2936,9 +2938,6 @@ class TabWidget : Widget {
 			});
 		} else static assert(0);
 	}
-
-	override int marginTop() { return 4; }
-	override int marginBottom() { return 4; }
 
 	override int minHeight() {
 		int max = 0;
