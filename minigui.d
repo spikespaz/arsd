@@ -1466,6 +1466,8 @@ class Widget {
 
 			if(parent && recalculate) {
 				parent.recomputeChildLayout();
+                version(win32_widgets)
+                    InvalidateRect(parent.hwnd, null, true);
 				parent.redraw();
 			}
 
