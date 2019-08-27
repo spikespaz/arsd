@@ -3441,6 +3441,8 @@ class Window : Widget {
 			this.width = w;
 			this.height = h;
 			recomputeChildLayout();
+			version(win32_widgets)
+				InvalidateRect(hwnd, null, true);
 			redraw();
 		};
 
