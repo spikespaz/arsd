@@ -274,6 +274,18 @@ abstract class ComboboxBase : Widget {
         return "";
     }
 
+    void currentText(string value) {
+        foreach (uint index, string option; this.options)
+            if (option == value) {
+                this.setSelection(index);
+                return;
+            }
+
+        // not found
+        this.addOption(value);
+        this.setSelection(this.options.length - 1);
+    }
+
 	void addOption(string s) {
 		options ~= s;
 		version(win32_widgets)
