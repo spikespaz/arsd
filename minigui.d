@@ -373,7 +373,7 @@ abstract class ComboboxBase : Widget {
 class DropDownSelection : ComboboxBase {
 	this(Widget parent = null) {
 		version(win32_widgets)
-			super(3 /* CBS_DROPDOWNLIST */, parent);
+			super(3 /* CBS_DROPDOWNLIST */ | WS_VSCROLL, parent);
 		else version(custom_widgets) {
 			super(parent);
 
@@ -389,7 +389,7 @@ class DropDownSelection : ComboboxBase {
 	}
 
 	version(custom_widgets)
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		draw3dFrame(this, painter, FrameStyle.risen);
 		painter.outlineColor = Color.black;
 		painter.drawText(Point(4, 4), selection == -1 ? "" : options[selection]);
@@ -1159,6 +1159,21 @@ extern(Windows) BOOL childHandler(HWND hwnd, LPARAM lparam) {
 	return true;
 }
 
+/++
+
++/
+struct WidgetPainter {
+	///
+	ScreenPainter screenPainter;
+	/// Forward to the screen painter for other methods
+	alias screenPainter this;
+
+	/++
+		This is the list of rectangles that actually need to be redrawn.
+	+/
+	Rectangle[] invalidatedRectangles;
+}
+
 /**
 	The way this module works is it builds on top of a SimpleWindow
 	from simpledisplay to provide simple controls and such.
@@ -1182,6 +1197,9 @@ class Widget {
     void setEnabled(bool yes) {
         EnableWindow(this.hwnd, yes);
     }
+	
+	deprecated("Change ScreenPainter to WidgetPainter")
+	final void paint(ScreenPainter) { assert(0, "Change ScreenPainter to WidgetPainter and recompile your code"); }
 
 	///
 	@scriptable
@@ -1577,11 +1595,11 @@ class Widget {
 	}
 
 	///
-	void paint(ScreenPainter painter) {}
+	void paint(WidgetPainter painter) {}
 
 	/// I don't actually like the name of this
 	/// this draws a background on it
-	void erase(ScreenPainter painter) {
+	void erase(WidgetPainter painter) {
 		version(win32_widgets)
 			if(hwnd) return; // Windows will do it. I think.
 
@@ -1624,7 +1642,7 @@ class Widget {
 	}
 
 	///
-	ScreenPainter draw() {
+	WidgetPainter draw() {
 		int x = this.x, y = this.y;
 		auto parent = this.parent;
 		while(parent) {
@@ -1637,10 +1655,10 @@ class Widget {
 		painter.originX = x;
 		painter.originY = y;
 		painter.setClipRectangle(Point(0, 0), width, height);
-		return painter;
+		return WidgetPainter(painter);
 	}
 
-	protected void privatePaint(ScreenPainter painter, int lox, int loy, bool force = false) {
+	protected void privatePaint(WidgetPainter painter, int lox, int loy, bool force = false) {
 		if(hidden)
 			return;
 
@@ -1668,7 +1686,7 @@ class Widget {
 		version(win32_widgets)
 		foreach(child; children) {
 			if(child.useNativeDrawing) {
-				painter = child.simpleWindowWrappingHwnd.draw;
+				painter = WidgetPainter(child.simpleWindowWrappingHwnd.draw);
 				child.privatePaint(painter, painter.originX, painter.originY, actuallyPainted);
 			}
 		}
@@ -1719,7 +1737,7 @@ class Widget {
 			ugh = ugh.parent;
 		}
 		auto painter = w.draw();
-		privatePaint(painter, lox, loy);
+		privatePaint(WidgetPainter(painter), lox, loy);
 	}
 
 	SimpleWindow drawableWindow;
@@ -1769,7 +1787,7 @@ class OpenGlWidget : Widget {
 		}
 	}
 
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		win.redrawOpenGlSceneNow();
 	}
 
@@ -1842,11 +1860,11 @@ class ListWidget : ScrollableWidget {
 		super(parent);
 	}
 
-	override void paintFrameAndBackground(ScreenPainter painter) {
+	override void paintFrameAndBackground(WidgetPainter painter) {
 		draw3dFrame(this, painter, FrameStyle.sunk, Color.white);
 	}
 
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		auto pos = Point(4, 4);
 		foreach(idx, option; options) {
 			painter.fillColor = Color.white;
@@ -2223,7 +2241,7 @@ class ScrollableWidget : Widget {
 	/// This is called before the ordinary paint delegate,
 	/// giving you a chance to draw the window frame, etc,
 	/// before the scroll clip takes effect
-	void paintFrameAndBackground(ScreenPainter painter) {
+	void paintFrameAndBackground(WidgetPainter painter) {
 		version(win32_widgets) {
 			auto b = SelectObject(painter.impl.hdc, GetSysColorBrush(COLOR_3DFACE));
 			auto p = SelectObject(painter.impl.hdc, GetStockObject(NULL_PEN));
@@ -2243,7 +2261,7 @@ class ScrollableWidget : Widget {
 		END SCROLLING
 	*/
 
-	override ScreenPainter draw() {
+	override WidgetPainter draw() {
 		int x = this.x, y = this.y;
 		auto parent = this.parent;
 		while(parent) {
@@ -2264,10 +2282,10 @@ class ScrollableWidget : Widget {
 		painter.originY = painter.originY - scrollOrigin.y;
 		painter.setClipRectangle(scrollOrigin, viewportWidth(), viewportHeight());
 
-		return painter;
+		return WidgetPainter(painter);
 	}
 
-	override protected void privatePaint(ScreenPainter painter, int lox, int loy, bool force = false) {
+	override protected void privatePaint(WidgetPainter painter, int lox, int loy, bool force = false) {
 		if(hidden)
 			return;
 
@@ -2412,7 +2430,7 @@ class ScrollableClientWidget : Widget {
 	this(Widget parent) {
 		super(parent);
 	}
-	override void paint(ScreenPainter p) {
+	override void paint(WidgetPainter p) {
 		parent.paint(p);
 	}
 }
@@ -2629,7 +2647,7 @@ class MouseTrackingWidget : Widget {
 	}
 
 	version(custom_widgets)
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		auto c = darken(windowBackgroundColor, 0.2);
 		painter.outlineColor = c;
 		painter.fillColor = c;
@@ -3053,7 +3071,7 @@ class TabWidget : Widget {
 	}
 
 	version(custom_widgets)
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 
 		draw3dFrame(0, tabBarHeight - 2, width, height - tabBarHeight + 2, painter, FrameStyle.risen);
 
@@ -3136,6 +3154,10 @@ class TabWidget : Widget {
 				child.show();
 				recomputeChildLayout();
 			}
+		}
+
+		version(win32_widgets) {
+			InvalidateRect(parentWindow.hwnd, null, true);
 		}
 	}
 }
@@ -3546,7 +3568,7 @@ class Window : Widget {
 	}
 
 	version(win32_widgets)
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		/*
 		RECT rect;
 		rect.right = this.width;
@@ -3562,7 +3584,7 @@ class Window : Widget {
 		SelectObject(painter.impl.hdc, b);
 	}
 	version(custom_widgets)
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		painter.fillColor = windowBackgroundColor;
 		painter.outlineColor = windowBackgroundColor;
 		painter.drawRectangle(Point(0, 0), this.width, this.height);
@@ -4323,7 +4345,7 @@ class ToolButton : Button {
 	override int minHeight() { return toolbarIconSize; }
 
 	version(custom_widgets)
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		this.draw3dFrame(painter, isDepressed ? FrameStyle.sunk : FrameStyle.risen, currentButtonColor);
 
 		painter.outlineColor = Color.black;
@@ -4450,7 +4472,7 @@ class MenuBar : Widget {
 	} else static assert(false);
 
 	version(custom_widgets)
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		draw3dFrame(this, painter, FrameStyle.risen);
 	}
 
@@ -4605,7 +4627,7 @@ class StatusBar : Widget {
 	}
 
 	version(custom_widgets)
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		this.draw3dFrame(painter, FrameStyle.sunk);
 		int cpos = 0;
 		int remainingLength = this.width;
@@ -4659,7 +4681,7 @@ class ProgressBar : Widget {
 	}
 
 	version(custom_widgets)
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		this.draw3dFrame(painter, FrameStyle.sunk);
 		painter.fillColor = progressBarColor;
 		painter.drawRectangle(Point(0, 0), width * current / max, height);
@@ -4760,7 +4782,7 @@ class Fieldset : Widget {
 	}
 
 	version(custom_widgets)
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		painter.fillColor = Color.transparent;
 		painter.pen = Pen(Color.black, 1);
 		painter.drawRectangle(Point(0, Window.lineHeight / 2), width, height - Window.lineHeight / 2);
@@ -4813,7 +4835,7 @@ class HorizontalRule : Widget {
 		super(parent);
 	}
 
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		painter.outlineColor = darkAccentColor;
 		painter.drawLine(Point(0, 0), Point(width, 0));
 		painter.outlineColor = lightAccentColor;
@@ -4832,7 +4854,7 @@ class VerticalRule : Widget {
 		super(parent);
 	}
 
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		painter.outlineColor = darkAccentColor;
 		painter.drawLine(Point(0, 0), Point(0, height));
 		painter.outlineColor = lightAccentColor;
@@ -4984,7 +5006,7 @@ class Menu : Window {
 	override int minHeight() { return Window.lineHeight; }
 
 	version(custom_widgets)
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		this.draw3dFrame(painter, FrameStyle.risen);
 	}
 }
@@ -5017,7 +5039,7 @@ class MenuItem : MouseActivatedWidget {
 	}
 
 	version(custom_widgets)
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		if(isDepressed)
 			this.draw3dFrame(painter, FrameStyle.sunk);
 		if(isHovering)
@@ -5184,7 +5206,7 @@ class Checkbox : MouseActivatedWidget {
 	}
 
 	version(custom_widgets)
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		if(isFocused()) {
 			painter.pen = Pen(Color.black, 1, Pen.Style.Dotted);
 			painter.fillColor = windowBackgroundColor;
@@ -5276,7 +5298,7 @@ class Radiobox : MouseActivatedWidget {
 	else static assert(false);
 
 	version(custom_widgets)
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		if(isFocused) {
 			painter.fillColor = windowBackgroundColor;
 			painter.pen = Pen(Color.black, 1, Pen.Style.Dotted);
@@ -5395,7 +5417,7 @@ class Button : MouseActivatedWidget {
 	override int minHeight() { return Window.lineHeight + 4; }
 
 	version(custom_widgets)
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		this.draw3dFrame(painter, isDepressed ? FrameStyle.sunk : FrameStyle.risen, currentButtonColor);
 
 
@@ -5459,7 +5481,7 @@ class ArrowButton : Button {
 	override int minWidth() { return 16; }
 	override int maxWidth() { return 16; }
 
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		super.paint(painter);
 
 		painter.outlineColor = Color.black;
@@ -5570,7 +5592,7 @@ class ImageBox : Widget {
 			sprite = new Sprite(this.parentWindow.win, Image.fromMemoryImage(image_));
 	}
 
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		updateSprite();
 		if(backgroundColor_.a) {
 			painter.fillColor = backgroundColor_;
@@ -5626,7 +5648,7 @@ class TextLabel : Widget {
 	TextAlignment alignment;
 
 	version(custom_widgets)
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		painter.outlineColor = Color.black;
 		painter.drawText(Point(0, 0), this.label, Point(width, height), alignment);
 	}
@@ -5746,7 +5768,7 @@ abstract class EditableTextWidget : EditableTextWidgetParent {
 	}
 
 	version(custom_widgets)
-	override void paintFrameAndBackground(ScreenPainter painter) {
+	override void paintFrameAndBackground(WidgetPainter painter) {
 		this.draw3dFrame(painter, FrameStyle.sunk, Color.white);
 	}
 
@@ -5761,7 +5783,7 @@ abstract class EditableTextWidget : EditableTextWidgetParent {
 			textLayout = new TextLayout(Rectangle(4, 2, width - 8, height - 4));
 		}
 
-		override void paint(ScreenPainter painter) {
+		override void paint(WidgetPainter painter) {
 			if(parentWindow.win.closed) return;
 
 			textLayout.boundingBox = Rectangle(4, 2, width - 8, height - 4);
@@ -6034,7 +6056,7 @@ class MessageBox : Window {
 		redraw();
 	}
 
-	override void paint(ScreenPainter painter) {
+	override void paint(WidgetPainter painter) {
 		super.paint(painter);
 		painter.outlineColor = Color.black;
 		painter.drawText(Point(0, 0), message, Point(width, height / 2), TextAlignment.Center | TextAlignment.VerticalCenter);
