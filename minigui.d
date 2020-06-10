@@ -5765,8 +5765,6 @@ class Checkbox : MouseActivatedWidget {
 		override int minHeight() { return Window.lineHeight; }
 	} else static assert(0);
 
-	override int marginLeft() { return 4; }
-
 	private string label;
 
 	///
