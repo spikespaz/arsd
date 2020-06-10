@@ -5,12 +5,25 @@
 		repl is a different set of globals
 		maybe ctrl+enter to execute vs insert another line
 
+
 		write state to file
 		read state from file
-			state consists of all variables and source to functions
+			state consists of all variables and source to functions.
+			maybe need @retained for a variable that is meant to keep
+			its value between loads?
+
+		ddoc????
 
 	Steal Ruby's [regex, capture] maybe
+
+	and the => operator too
+
+	I kinda like the javascript foo`blargh` template literals too.
+
+	++ and -- are not implemented.
+
 */
+
 /++
 	A small script interpreter that builds on [arsd.jsvar] to be easily embedded inside and to have has easy
 	two-way interop with the host D program.  The script language it implements is based on a hybrid of D and Javascript.
@@ -20,6 +33,17 @@
 	your existing knowledge from Javascript will carry over, making it hopefully easy to use right out of the box.
 	See the [#examples] to quickly get the feel of the script language as well as the interop.
 
+
+	$(TIP
+		A goal of this language is to blur the line between D and script, but
+		in the examples below, which are generated from D unit tests,
+		the non-italics code is D, and the italics is the script. Notice
+		how it is a string passed to the [interpret] function.
+
+		In some smaller, stand-alone code samples, there will be a tag "adrscript"
+		in the upper right of the box to indicate it is script. Otherwise, it
+		is D.
+	)
 
 	Installation_instructions:
 	This script interpreter is contained entirely in two files: jsvar.d and script.d. Download both of them
@@ -57,8 +81,10 @@
 	* try/catch/finally/throw
 		You can use try as an expression without any following catch to return the exception:
 
+		```adrscript
 		var a = try throw "exception";; // the double ; is because one closes the try, the second closes the var
 		// a is now the thrown exception
+		```
 	* for/while/foreach
 	* D style operators: +-/* on all numeric types, ~ on strings and arrays, |&^ on integers.
 		Operators can coerce types as needed: 10 ~ "hey" == "10hey". 10 + "3" == 13.
@@ -67,17 +93,21 @@
 
 		So you can do some type coercion like this:
 
+		```adrscript
 		a = a|0; // forces to int
 		a = "" ~ a; // forces to string
 		a = a+0.0; // coerces to float
+		```
 
 		Though casting is probably better.
 	* Type coercion via cast, similarly to D.
+		```adrscript
 		var a = "12";
 		a.typeof == "String";
 		a = cast(int) a;
 		a.typeof == "Integral";
 		a == 12;
+		```
 
 		Supported types for casting to: int/long (both actually an alias for long, because of how var works), float/double/real, string, char/dchar (these return *integral* types), and arrays, int[], string[], and float[].
 
@@ -97,9 +127,11 @@
 	* variables must start with A-Z, a-z, _, or $, then must be [A-Za-z0-9_]*.
 		(The $ can also stand alone, and this is a special thing when slicing, so you probably shouldn't use it at all.).
 		Variable names that start with __ are reserved and you shouldn't use them.
-	* int, float, string, array, bool, and json!q{} literals
+	* int, float, string, array, bool, and `#{}` (previously known as `json!q{}` aka object) literals
 	* var.prototype, var.typeof. prototype works more like Mozilla's __proto__ than standard javascript prototype.
+	* the `|>` pipeline operator
 	* classes:
+		```adrscript
 		// inheritance works
 		class Foo : bar {
 			// constructors, D style
@@ -123,6 +155,7 @@
 		var foo = new Foo(12);
 
 		foo.newFunc = function() { this.derived = 0; }; // this is ok too, and scoping, including 'this', works like in Javascript
+		```
 
 		You can also use 'new' on another object to get a copy of it.
 	* return, break, continue, but currently cannot do labeled breaks and continues
@@ -156,29 +189,40 @@
 	)
 
 
-	FIXME:
-		* make sure superclass ctors are called
+	Todo_list:
+
+	I also have a wishlist here that I may do in the future, but don't expect them any time soon.
+
+FIXME: maybe some kind of splat operator too. choose([1,2,3]...) expands to choose(1,2,3)
+
+make sure superclass ctors are called
 
    FIXME: prettier stack trace when sent to D
 
-   FIXME: interpolated string: "$foo" or "#{expr}" or something.
    FIXME: support more escape things in strings like \n, \t etc.
 
    FIXME: add easy to use premade packages for the global object.
 
-   FIXME: maybe simplify the json!q{ } thing a bit.
-
    FIXME: the debugger statement from javascript might be cool to throw in too.
 
-   FIXME: add continuations or something too
+   FIXME: add continuations or something too - actually doing it with fibers works pretty well
 
    FIXME: Also ability to get source code for function something so you can mixin.
-   FIXME: add COM support on Windows
+
+   FIXME: add COM support on Windows ????
 
 
 	Might be nice:
 		varargs
 		lambdas - maybe without function keyword and the x => foo syntax from D.
+
+
+	History:
+		April 28, 2020: added `#{}` as an alternative to the `json!q{}` syntax for object literals. Also fixed unary `!` operator.
+
+		April 26, 2020: added `switch`, fixed precedence bug, fixed doc issues and added some unittests
+
+		Started writing it in July 2013. Yes, a basic precedence issue was there for almost SEVEN YEARS. You can use this as a toy but please don't use it for anything too serious, it really is very poorly written and not intelligently designed at all.
 +/
 module arsd.script;
 
@@ -273,6 +317,113 @@ unittest {
 	}, globals);
 }
 
+/++
+	$(H3 Classes demo)
+
+	See also: [arsd.jsvar.subclassable] for more interop with D classes.
++/
+unittest {
+	var globals = var.emptyObject;
+	interpret(q{
+		class Base {
+			function foo() { return "Base"; }
+			function set() { this.a = 10; }
+			function get() { return this.a; } // this MUST be used for instance variables though as they do not exist in static lookup
+			function test() { return foo(); } // I did NOT use `this` here which means it does STATIC lookup!
+							// kinda like mixin templates in D lol.
+			var a = 5;
+			static var b = 10; // static vars are attached to the class specifically
+		}
+		class Child : Base {
+			function foo() {
+				assert(super.foo() == "Base");
+				return "Child";
+			};
+			function set() { this.a = 7; }
+			function get2() { return this.a; }
+			var a = 9;
+		}
+
+		var c = new Child();
+		assert(c.foo() == "Child");
+
+		assert(c.test() == "Base"); // static lookup of methods if you don't use `this`
+
+		/*
+		// these would pass in D, but do NOT pass here because of dynamic variable lookup in script.
+		assert(c.get() == 5);
+		assert(c.get2() == 9);
+		c.set();
+		assert(c.get() == 5); // parent instance is separate
+		assert(c.get2() == 7);
+		*/
+
+		// showing the shared vars now.... I personally prefer the D way but meh, this lang
+		// is an unholy cross of D and Javascript so that means it sucks sometimes.
+		assert(c.get() == c.get2());
+		c.set();
+		assert(c.get2() == 7);
+		assert(c.get() == c.get2());
+
+		// super, on the other hand, must always be looked up statically, or else this
+		// next example with infinite recurse and smash the stack.
+		class Third : Child { }
+		var t = new Third();
+		assert(t.foo() == "Child");
+	}, globals);
+}
+
+/++
+	$(H3 Properties from D)
+
+	Note that it is not possible yet to define a property function from the script language.
++/
+unittest {
+	static class Test {
+		// the @scriptable is required to make it accessible
+		@scriptable int a;
+
+		@scriptable @property int ro() { return 30; }
+
+		int _b = 20;
+		@scriptable @property int b() { return _b; }
+		@scriptable @property int b(int val) { return _b = val; }
+	}
+
+	Test test = new Test;
+
+	test.a = 15;
+
+	var globals = var.emptyObject;
+	globals.test = test;
+	// but once it is @scriptable, both read and write works from here:
+	interpret(q{
+		assert(test.a == 15);
+		test.a = 10;
+		assert(test.a == 10);
+
+		assert(test.ro == 30); // @property functions from D wrapped too
+		test.ro = 40;
+		assert(test.ro == 30); // setting it does nothing though
+
+		assert(test.b == 20); // reader still works if read/write available too
+		test.b = 25;
+		assert(test.b == 25); // writer action reflected
+
+		// however other opAssign operators are not implemented correctly on properties at this time so this fails!
+		//test.b *= 2;
+		//assert(test.b == 50);
+	}, globals);
+
+	// and update seen back in D
+	assert(test.a == 10); // on the original native object
+	assert(test.b == 25);
+
+	assert(globals.test.a == 10); // and via the var accessor for member var
+	assert(globals.test.b == 25); // as well as @property func
+}
+
+
 public import arsd.jsvar;
 
 import std.stdio;
@@ -287,16 +438,41 @@ import std.range;
   script to follow
 ****************************************/
 
+/++
+	A base class for exceptions that can never be caught by scripts;
+	throwing it from a function called from a script is guaranteed to
+	bubble all the way up to your [interpret] call..
+	(scripts can also never catch Error btw)
+
+	History:
+		Added on April 24, 2020 (v7.3.0)
++/
+class NonScriptCatchableException : Exception {
+	import std.exception;
+	///
+	mixin basicExceptionCtors;
+}
+
+//class TEST : Throwable {this() { super("lol"); }}
+
 /// Thrown on script syntax errors and the sort.
 class ScriptCompileException : Exception {
-	this(string msg, int lineNumber, string file = __FILE__, size_t line = __LINE__) {
+	string s;
+	int lineNumber;
+	this(string msg, string s, int lineNumber, string file = __FILE__, size_t line = __LINE__) {
+		this.s = s;
+		this.lineNumber = lineNumber;
 		super(to!string(lineNumber) ~ ": " ~ msg, file, line);
 	}
 }
 
 /// Thrown on things like interpretation failures.
 class ScriptRuntimeException : Exception {
-	this(string msg, int lineNumber, string file = __FILE__, size_t line = __LINE__) {
+	string s;
+	int lineNumber;
+	this(string msg, string s, int lineNumber, string file = __FILE__, size_t line = __LINE__) {
+		this.s = s;
+		this.lineNumber = lineNumber;
 		super(to!string(lineNumber) ~ ": " ~ msg, file, line);
 	}
 }
@@ -306,16 +482,25 @@ class ScriptException : Exception {
 	///
 	var payload;
 	///
-	int lineNumber;
-	this(var payload, int lineNumber, string file = __FILE__, size_t line = __LINE__) {
+	ScriptLocation loc;
+	///
+	ScriptLocation[] callStack;
+	this(var payload, ScriptLocation loc, string file = __FILE__, size_t line = __LINE__) {
 		this.payload = payload;
-		this.lineNumber = lineNumber;
-		super("script@" ~ to!string(lineNumber) ~ ": " ~ to!string(payload), file, line);
+		if(loc.scriptFilename.length == 0)
+			loc.scriptFilename = "user_script";
+		this.loc = loc;
+		super(loc.scriptFilename ~ "@" ~ to!string(loc.lineNumber) ~ ": " ~ to!string(payload), file, line);
 	}
 
+	/*
 	override string toString() {
-		return "script@" ~ to!string(lineNumber) ~ ": " ~ payload.get!string;
+		return loc.scriptFilename ~ "@" ~ to!string(loc.lineNumber) ~ ": " ~ payload.get!string ~ to!string(callStack);
 	}
+	*/
+
+	// might be nice to take a D exception and put a script stack trace in there too......
+	// also need toString to show the callStack
 }
 
 struct ScriptToken {
@@ -335,18 +520,24 @@ private enum string[] keywords = [
 	"__FILE__", "__LINE__", // these two are special to the lexer
 	"foreach", "json!q{", "default", "finally",
 	"return", "static", "struct", "import", "module", "assert", "switch",
-	"while", "catch", "throw", "scope", "break", "super", "class", "false", "mixin", "super", "macro",
+	"while", "catch", "throw", "scope", "break", "class", "false", "mixin", "macro", "super",
+	// "this" is just treated as just a magic identifier.....
 	"auto", // provided as an alias for var right now, may change later
 	"null", "else", "true", "eval", "goto", "enum", "case", "cast",
 	"var", "for", "try", "new",
 	"if", "do",
 ];
 private enum string[] symbols = [
+	">>>", // FIXME
 	"//", "/*", "/+",
 	"&&", "||",
 	"+=", "-=", "*=", "/=", "~=",  "==", "<=", ">=","!=", "%=",
 	"&=", "|=", "^=",
+	"#{",
 	"..",
+	"<<", ">>", // FIXME
+	"|>",
+	"=>", // FIXME
 	"?", ".",",",";",":",
 	"[", "]", "{", "}", "(", ")",
 	"&", "|", "^",
@@ -567,7 +758,7 @@ class TokenStream(TextStream) {
 				}
 
 				if(pos == text.length && (escaped || inInterpolate || !atEnd()))
-					throw new ScriptCompileException("Unclosed string literal", token.lineNumber);
+					throw new ScriptCompileException("Unclosed string literal", token.scriptFilename, token.lineNumber);
 
 				if(mustCopy) {
 					// there must be something escaped in there, so we need
@@ -589,7 +780,7 @@ class TokenStream(TextStream) {
 								case '"': copy ~= "\""; break;
 								case '\'': copy ~= "'"; break;
 								default:
-									throw new ScriptCompileException("Unknown escape char " ~ cast(char) ch, token.lineNumber);
+									throw new ScriptCompileException("Unknown escape char " ~ cast(char) ch, token.scriptFilename, token.lineNumber);
 							}
 							continue;
 						} else if(ch == '\\') {
@@ -625,13 +816,32 @@ class TokenStream(TextStream) {
 								pos++;
 
 							if(pos + 1 == text.length)
-								throw new ScriptCompileException("unclosed /* */ comment", lineNumber);
+								throw new ScriptCompileException("unclosed /* */ comment", token.scriptFilename, lineNumber);
 
 							advance(pos + 2);
 							continue mainLoop;
 
 						} else if(symbol == "/+") {
-							// FIXME: nesting comment
+							int open = 0;
+							int pos = 0;
+							while(pos + 1 < text.length) {
+								if(text[pos..pos+2] == "/+") {
+									open++;
+									pos++;
+								} else if(text[pos..pos+2] == "+/") {
+									open--;
+									pos++;
+									if(open == 0)
+										break;
+								}
+								pos++;
+							}
+
+							if(pos + 1 == text.length)
+								throw new ScriptCompileException("unclosed /+ +/ comment", token.scriptFilename, lineNumber);
+
+							advance(pos + 1);
+							continue mainLoop;
 						}
 						// FIXME: documentation comments
 
@@ -644,7 +854,7 @@ class TokenStream(TextStream) {
 
 				if(!found) {
 					// FIXME: make sure this gives a valid utf-8 sequence
-					throw new ScriptCompileException("unknown token " ~ text[0], lineNumber);
+					throw new ScriptCompileException("unknown token " ~ text[0], token.scriptFilename, lineNumber);
 				}
 			}
 
@@ -821,7 +1031,7 @@ class StringLiteralExpression : Expression {
 					idx++;
 				}
 				if(open != 0)
-					throw new ScriptRuntimeException("Unclosed interpolation thing", token.lineNumber);
+					throw new ScriptRuntimeException("Unclosed interpolation thing", token.scriptFilename, token.lineNumber);
 				auto code = c[0 .. idx];
 
 				var result = .interpret(code, sc);
@@ -902,6 +1112,28 @@ class NegationExpression : Expression {
 		return InterpretResult(-n, sc);
 	}
 }
+class NotExpression : Expression {
+	Expression e;
+	this(Expression e) { this.e = e;}
+	override string toString() { return "!" ~ e.toString(); }
+
+	override InterpretResult interpret(PrototypeObject sc) {
+		var n = e.interpret(sc).value;
+		return InterpretResult(var(!n), sc);
+	}
+}
+class BitFlipExpression : Expression {
+	Expression e;
+	this(Expression e) { this.e = e;}
+	override string toString() { return "~" ~ e.toString(); }
+
+	override InterpretResult interpret(PrototypeObject sc) {
+		var n = e.interpret(sc).value;
+		// possible FIXME given the size. but it is fuzzy when dynamic..
+		return InterpretResult(var(~(n.get!long)), sc);
+	}
+}
+
 class ArrayLiteralExpression : Expression {
 	this() {}
 
@@ -927,7 +1159,7 @@ class ObjectLiteralExpression : Expression {
 	Expression[string] elements;
 
 	override string toString() {
-		string s = "json!q{";
+		string s = "#{";
 		bool first = true;
 		foreach(k, e; elements) {
 			if(first)
@@ -977,7 +1209,8 @@ class FunctionLiteralExpression : Expression {
 
 	override string toString() {
 		string s = (isMacro ? "macro" : "function") ~ " (";
-		s ~= arguments.toString();
+		if(arguments !is null)
+			s ~= arguments.toString();
 
 		s ~= ") ";
 		s ~= functionBody.toString();
@@ -1004,6 +1237,7 @@ class FunctionLiteralExpression : Expression {
 	override InterpretResult interpret(PrototypeObject sc) {
 		assert(DefaultArgumentDummyObject !is null);
 		var v;
+		v._metadata = new ScriptFunctionMetadata(this);
 		v._function = (var _this, var[] args) {
 			auto argumentsScope = new PrototypeObject();
 			PrototypeObject scToUse;
@@ -1126,10 +1360,17 @@ class BinaryExpression : Expression {
 		//writeln(left, " "~op~" ", right);
 
 		var n;
-		foreach(ctOp; CtList!("+", "-", "*", "/", "==", "!=", "<=", ">=", ">", "<", "~", "&&", "||", "&", "|", "^", "%"))
-			if(ctOp == op) {
+		sw: switch(op) {
+			// I would actually kinda prefer this to be static foreach, but normal
+			// tuple foreach here has broaded compiler compatibility.
+			foreach(ctOp; CtList!("+", "-", "*", "/", "==", "!=", "<=", ">=", ">", "<", "~", "&&", "||", "&", "|", "^", "%")) //, ">>", "<<", ">>>")) // FIXME
+			case ctOp: {
 				n = mixin("left "~ctOp~" right");
+				break sw;
 			}
+			default:
+				assert(0, op);
+		}
 
 		return InterpretResult(n, sc);
 	}
@@ -1154,7 +1395,7 @@ class OpAssignExpression : Expression {
 
 		auto v = cast(VariableExpression) e1;
 		if(v is null)
-			throw new ScriptRuntimeException("not an lvalue", 0 /* FIXME */);
+			throw new ScriptRuntimeException("not an lvalue", null, 0 /* FIXME */);
 
 		var right = e2.interpret(sc).value;
 
@@ -1169,6 +1410,33 @@ class OpAssignExpression : Expression {
 
 		return InterpretResult(n, sc);
 
+	}
+}
+
+class PipelineExpression : Expression {
+	Expression e1;
+	Expression e2;
+	CallExpression ce;
+	ScriptLocation loc;
+
+	this(ScriptLocation loc, Expression e1, Expression e2) {
+		this.loc = loc;
+		this.e1 = e1;
+		this.e2 = e2;
+
+		if(auto ce = cast(CallExpression) e2) {
+			this.ce = new CallExpression(loc, ce.func);
+			this.ce.arguments = [e1] ~ ce.arguments;
+		} else {
+			this.ce = new CallExpression(loc, e2);
+			this.ce.arguments ~= e1;
+		}
+	}
+
+	override string toString() { return e1.toString() ~ " |> " ~ e2.toString(); }
+
+	override InterpretResult interpret(PrototypeObject sc) {
+		return ce.interpret(sc);
 	}
 }
 
@@ -1188,30 +1456,20 @@ class AssignExpression : Expression {
 	override InterpretResult interpret(PrototypeObject sc) {
 		auto v = cast(VariableExpression) e1;
 		if(v is null)
-			throw new ScriptRuntimeException("not an lvalue", 0 /* FIXME */);
+			throw new ScriptRuntimeException("not an lvalue", null, 0 /* FIXME */);
 
 		auto ret = v.setVar(sc, e2.interpret(sc).value, false, suppressOverloading);
 
 		return InterpretResult(ret, sc);
 	}
 }
-
-
-class UnaryExpression : Expression {
-	string op;
-	Expression e;
-	// FIXME
-
-	override InterpretResult interpret(PrototypeObject sc) {
-		return InterpretResult();
-	}
-}
-
 class VariableExpression : Expression {
 	string identifier;
+	ScriptLocation loc;
 
-	this(string identifier) {
+	this(string identifier, ScriptLocation loc = ScriptLocation.init) {
 		this.identifier = identifier;
+		this.loc = loc;
 	}
 
 	override string toString() {
@@ -1223,7 +1481,12 @@ class VariableExpression : Expression {
 	}
 
 	ref var getVar(PrototypeObject sc, bool recurse = true) {
-		return sc._getMember(identifier, true /* FIXME: recurse?? */, true);
+		try {
+			return sc._getMember(identifier, true /* FIXME: recurse?? */, true);
+		} catch(DynamicTypeException dte) {
+			dte.callStack ~= loc;
+			throw dte;
+		}
 	}
 
 	ref var setVar(PrototypeObject sc, var t, bool recurse = true, bool suppressOverloading = false) {
@@ -1236,6 +1499,41 @@ class VariableExpression : Expression {
 
 	override InterpretResult interpret(PrototypeObject sc) {
 		return InterpretResult(getVar(sc), sc);
+	}
+}
+
+class SuperExpression : Expression {
+	VariableExpression dot;
+	string origDot;
+	this(VariableExpression dot) {
+		if(dot !is null) {
+			origDot = dot.identifier;
+			//dot.identifier = "__super_" ~ dot.identifier; // omg this is so bad
+		}
+		this.dot = dot;
+	}
+
+	override string toString() {
+		if(dot is null)
+			return "super";
+		else
+			return "super." ~ origDot;
+	}
+
+	override InterpretResult interpret(PrototypeObject sc) {
+		var a = sc._getMember("super", true, true);
+		if(a._object is null)
+			throw new Exception("null proto for super");
+		PrototypeObject proto = a._object.prototype;
+		if(proto is null)
+			throw new Exception("no super");
+		//proto = proto.prototype;
+
+		if(dot !is null)
+			a = proto._getMember(dot.identifier, true, true);
+		else
+			a = proto._getMember("__ctor", true, true);
+		return InterpretResult(a, sc);
 	}
 }
 
@@ -1270,9 +1568,17 @@ class DotVarExpression : VariableExpression {
 			assert(0);
 		}
 
-		if(auto ve = cast(VariableExpression) e1)
+		if(e2.identifier == "__source") {
+			auto val = e1.interpret(sc).value;
+			if(auto meta = cast(ScriptFunctionMetadata) val._metadata)
+				return *(new var(meta.convertToString()));
+			else
+				return *(new var(val.toJson()));
+		}
+
+		if(auto ve = cast(VariableExpression) e1) {
 			return this.getVarFrom(sc, ve.getVar(sc, recurse));
-		else if(cast(StringLiteralExpression) e1 && e2.identifier == "interpolate") {
+		} else if(cast(StringLiteralExpression) e1 && e2.identifier == "interpolate") {
 			auto se = cast(StringLiteralExpression) e1;
 			var* functor = new var;
 			//if(!se.allowInterpolation)
@@ -1299,6 +1605,10 @@ class DotVarExpression : VariableExpression {
 
 	override ref var getVarFrom(PrototypeObject sc, ref var v) {
 		return e2.getVarFrom(sc, v);
+	}
+
+	override string toInterpretedString(PrototypeObject sc) {
+		return getVar(sc).get!string;
 	}
 }
 
@@ -1446,10 +1756,151 @@ class ScopeExpression : Expression {
 	}
 }
 
+class SwitchExpression : Expression {
+	Expression expr;
+	CaseExpression[] cases;
+	CaseExpression default_;
+
+	override InterpretResult interpret(PrototypeObject sc) {
+		auto e = expr.interpret(sc);
+
+		bool hitAny;
+		bool fallingThrough;
+		bool secondRun;
+
+		var last;
+
+		again:
+		foreach(c; cases) {
+			if(!secondRun && !fallingThrough && c is default_) continue;
+			if(fallingThrough || (secondRun && c is default_) || c.condition.interpret(sc) == e) {
+				fallingThrough = false;
+				if(!secondRun)
+					hitAny = true;
+				InterpretResult ret;
+				expr_loop: foreach(exp; c.expressions) {
+					ret = exp.interpret(sc);
+					with(InterpretResult.FlowControl)
+					final switch(ret.flowControl) {
+						case Normal:
+							last = ret.value;
+						break;
+						case Return:
+						case Goto:
+							return ret;
+						case Continue:
+							fallingThrough = true;
+							break expr_loop;
+						case Break:
+							return InterpretResult(last, sc);
+					}
+				}
+
+				if(!fallingThrough)
+					break;
+			}
+		}
+
+		if(!hitAny && !secondRun) {
+			secondRun = true;
+			goto again;
+		}
+
+		return InterpretResult(last, sc);
+	}
+}
+
+class CaseExpression : Expression {
+	this(Expression condition) {
+		this.condition = condition;
+	}
+	Expression condition;
+	Expression[] expressions;
+
+	override string toString() {
+		string code;
+		if(condition is null)
+			code = "default:";
+		else
+			code = "case " ~ condition.toString() ~ ":";
+
+		foreach(expr; expressions)
+			code ~= "\n" ~ expr.toString() ~ ";";
+
+		return code;
+	}
+
+	override InterpretResult interpret(PrototypeObject sc) {
+		// I did this inline up in the SwitchExpression above. maybe insane?!
+		assert(0);
+	}
+}
+
+unittest {
+	interpret(q{
+		var a = 10;
+		// case and break should work
+		var brk;
+
+		// var brk = switch doesn't parse, but this will.....
+		// (I kinda went everything is an expression but not all the way. this code SUX.)
+		brk = switch(a) {
+			case 10:
+				a = 30;
+			break;
+			case 30:
+				a = 40;
+			break;
+			default:
+				a = 0;
+		}
+
+		assert(a == 30);
+		assert(brk == 30); // value of switch set to last expression evaled inside
+
+		// so should default
+		switch(a) {
+			case 20:
+				a = 40;
+			break;
+			default:
+				a = 40;
+		}
+
+		assert(a == 40);
+
+		switch(a) {
+			case 40:
+				a = 50;
+			case 60: // no implicit fallthrough in this lang...
+				a = 60;
+		}
+
+		assert(a == 50);
+
+		var ret;
+
+		ret = switch(a) {
+			case 50:
+				a = 60;
+				continue; // request fallthrough. D uses "goto case", but I haven't implemented any goto yet so continue is best fit
+			case 90:
+				a = 70;
+		}
+
+		assert(a == 70); // the explicit `continue` requests fallthrough behavior
+		assert(ret == 70);
+	});
+}
+
 class ForeachExpression : Expression {
 	VariableDeclaration decl;
 	Expression subject;
 	Expression loopBody;
+
+	override string toString() {
+		return "foreach(" ~ decl.toString() ~ "; " ~ subject.toString() ~ ") " ~ loopBody.toString();
+	}
 
 	override InterpretResult interpret(PrototypeObject sc) {
 		var result;
@@ -1583,9 +2034,9 @@ class IfExpression : Expression {
 	}
 
 	override string toString() {
-		string code = "if(";
+		string code = "if ";
 		code ~= condition.toString();
-		code ~= ") ";
+		code ~= " ";
 		if(ifTrue !is null)
 			code ~= ifTrue.toString();
 		else
@@ -1643,7 +2094,7 @@ class ShallowCopyExpression : Expression {
 	override InterpretResult interpret(PrototypeObject sc) {
 		auto v = cast(VariableExpression) e1;
 		if(v is null)
-			throw new ScriptRuntimeException("not an lvalue", 0 /* FIXME */);
+			throw new ScriptRuntimeException("not an lvalue", null, 0 /* FIXME */);
 
 		v.getVar(sc, false)._object.copyPropertiesFrom(e2.interpret(sc).value._object);
 
@@ -1667,7 +2118,7 @@ class NewExpression : Expression {
 			args ~= arg.interpret(sc).value;
 
 		var original = what.interpret(sc).value;
-		var n = original._copy;
+		var n = original._copy_new;
 		if(n.payloadType() == var.Type.Object) {
 			var ctor = original.prototype ? original.prototype._getOwnProperty("__ctor") : var(null);
 			if(ctor)
@@ -1689,7 +2140,7 @@ class ThrowExpression : Expression {
 
 	override InterpretResult interpret(PrototypeObject sc) {
 		assert(whatToThrow !is null);
-		throw new ScriptException(whatToThrow.interpret(sc).value, where.lineNumber);
+		throw new ScriptException(whatToThrow.interpret(sc).value, ScriptLocation(where.scriptFilename, where.lineNumber));
 		assert(0);
 	}
 }
@@ -1711,6 +2162,9 @@ class ExceptionBlockExpression : Expression {
 		if(catchExpressions.length || (catchExpressions.length == 0 && finallyExpressions.length == 0))
 			try {
 				result = tryExpression.interpret(sc);
+			} catch(NonScriptCatchableException e) {
+				// the script cannot catch these so it continues up regardless
+				throw e;
 			} catch(Exception e) {
 				var ex = var.emptyObject;
 				ex.type = typeid(e).name;
@@ -1750,6 +2204,10 @@ class ParentheticalExpression : Expression {
 		this.inside = inside;
 	}
 
+	override string toString() {
+		return "(" ~ inside.toString() ~ ")";
+	}
+
 	override InterpretResult interpret(PrototypeObject sc) {
 		return InterpretResult(inside.interpret(sc).value, sc);
 	}
@@ -1779,6 +2237,7 @@ PrototypeObject DefaultArgumentDummyObject;
 class CallExpression : Expression {
 	Expression func;
 	Expression[] arguments;
+	ScriptLocation loc;
 
 	override string toString() {
 		string s = func.toString() ~ "(";
@@ -1791,8 +2250,13 @@ class CallExpression : Expression {
 		return s;
 	}
 
-	this(Expression func) {
+	this(ScriptLocation loc, Expression func) {
+		this.loc = loc;
 		this.func = func;
+	}
+
+	override string toInterpretedString(PrototypeObject sc) {
+		return interpret(sc).value.get!string;
 	}
 
 	override InterpretResult interpret(PrototypeObject sc) {
@@ -1807,7 +2271,7 @@ class CallExpression : Expression {
 			if(!v)
 				throw new ScriptException(
 					var(this.toString() ~ " failed, got: " ~ assertExpression.toInterpretedString(sc)),
-					asrt.token.lineNumber);
+					ScriptLocation(asrt.token.scriptFilename, asrt.token.lineNumber));
 
 			return InterpretResult(v, sc);
 		}
@@ -1836,18 +2300,30 @@ class CallExpression : Expression {
 			_this = dve.e1.interpret(sc).value;
 		} else if(auto ide = cast(IndexExpression) func) {
 			_this = ide.interpret(sc).value;
+		} else if(auto se = cast(SuperExpression) func) {
+			// super things are passed this object despite looking things up on the prototype
+			// so it calls the correct instance
+			_this = sc._getMember("this", true, true);
 		}
 
-		return InterpretResult(f.apply(_this, args), sc);
+		try {
+			return InterpretResult(f.apply(_this, args), sc);
+		} catch(DynamicTypeException dte) {
+			dte.callStack ~= loc;
+			throw dte;
+		} catch(ScriptException se) {
+			se.callStack ~= loc;
+			throw se;
+		}
 	}
 }
 
 ScriptToken requireNextToken(MyTokenStreamHere)(ref MyTokenStreamHere tokens, ScriptToken.Type type, string str = null, string file = __FILE__, size_t line = __LINE__) {
 	if(tokens.empty)
-		throw new ScriptCompileException("script ended prematurely", 0, file, line);
+		throw new ScriptCompileException("script ended prematurely", null, 0, file, line);
 	auto next = tokens.front;
 	if(next.type != type || (str !is null && next.str != str))
-		throw new ScriptCompileException("unexpected '"~next.str~"' while expecting " ~ to!string(type) ~ " " ~ str, next.lineNumber, file, line);
+		throw new ScriptCompileException("unexpected '"~next.str~"' while expecting " ~ to!string(type) ~ " " ~ str, next.scriptFilename, next.lineNumber, file, line);
 
 	tokens.popFront();
 	return next;
@@ -1867,9 +2343,9 @@ VariableExpression parseVariableName(MyTokenStreamHere)(ref MyTokenStreamHere to
 	auto token = tokens.front;
 	if(token.type == ScriptToken.Type.identifier) {
 		tokens.popFront();
-		return new VariableExpression(token.str);
+		return new VariableExpression(token.str, ScriptLocation(token.scriptFilename, token.lineNumber));
 	}
-	throw new ScriptCompileException("Found "~token.str~" when expecting identifier", token.lineNumber);
+	throw new ScriptCompileException("Found "~token.str~" when expecting identifier", token.scriptFilename, token.lineNumber);
 }
 
 Expression parsePart(MyTokenStreamHere)(ref MyTokenStreamHere tokens) {
@@ -1877,15 +2353,29 @@ Expression parsePart(MyTokenStreamHere)(ref MyTokenStreamHere tokens) {
 		auto token = tokens.front;
 
 		Expression e;
-		if(token.type == ScriptToken.Type.identifier)
+
+		if(token.str == "super") {
+			tokens.popFront();
+			VariableExpression dot;
+			if(!tokens.empty && tokens.front.str == ".") {
+				tokens.popFront();
+				dot = parseVariableName(tokens);
+			}
+			e = new SuperExpression(dot);
+		}
+		else if(token.type == ScriptToken.Type.identifier)
 			e = parseVariableName(tokens);
-		else if(token.type == ScriptToken.Type.symbol && (token.str == "-" || token.str == "+")) {
+		else if(token.type == ScriptToken.Type.symbol && (token.str == "-" || token.str == "+" || token.str == "!" || token.str == "~")) {
 			auto op = token.str;
 			tokens.popFront();
 
 			e = parsePart(tokens);
 			if(op == "-")
 				e = new NegationExpression(e);
+			else if(op == "!")
+				e = new NotExpression(e);
+			else if(op == "~")
+				e = new BitFlipExpression(e);
 		} else {
 			tokens.popFront();
 
@@ -1917,7 +2407,7 @@ Expression parsePart(MyTokenStreamHere)(ref MyTokenStreamHere tokens) {
 						bool first = true;
 						moreElements:
 						if(tokens.empty)
-							throw new ScriptCompileException("unexpected end of file when reading array literal", token.lineNumber);
+							throw new ScriptCompileException("unexpected end of file when reading array literal", token.scriptFilename, token.lineNumber);
 
 						auto peek = tokens.front;
 						if(peek.type == ScriptToken.Type.symbol && peek.str == "]") {
@@ -1934,6 +2424,7 @@ Expression parsePart(MyTokenStreamHere)(ref MyTokenStreamHere tokens) {
 
 						goto moreElements;
 					case "json!q{":
+					case "#{":
 						// json object literal
 						auto obj = new ObjectLiteralExpression();
 						/*
@@ -1949,7 +2440,7 @@ Expression parsePart(MyTokenStreamHere)(ref MyTokenStreamHere tokens) {
 						*/
 
 						if(tokens.empty)
-							throw new ScriptCompileException("unexpected end of file when reading object literal", token.lineNumber);
+							throw new ScriptCompileException("unexpected end of file when reading object literal", token.scriptFilename, token.lineNumber);
 
 						moreKeys:
 						auto key = tokens.front;
@@ -1960,7 +2451,7 @@ Expression parsePart(MyTokenStreamHere)(ref MyTokenStreamHere tokens) {
 							break;
 						}
 						if(key.type != ScriptToken.Type.string && key.type != ScriptToken.Type.identifier) {
-							throw new ScriptCompileException("unexpected '"~key.str~"' when reading object literal", key.lineNumber);
+							throw new ScriptCompileException("unexpected '"~key.str~"' when reading object literal", key.scriptFilename, key.lineNumber);
 
 						}
 
@@ -1968,7 +2459,7 @@ Expression parsePart(MyTokenStreamHere)(ref MyTokenStreamHere tokens) {
 
 						auto value = parseExpression(tokens);
 						if(tokens.empty)
-							throw new ScriptCompileException("unclosed object literal", key.lineNumber);
+							throw new ScriptCompileException("unclosed object literal", key.scriptFilename, key.lineNumber);
 
 						if(tokens.peekNextToken(ScriptToken.Type.symbol, ","))
 							tokens.popFront();
@@ -2005,11 +2496,9 @@ Expression parsePart(MyTokenStreamHere)(ref MyTokenStreamHere tokens) {
 				}
 			} else {
 				unknown:
-				throw new ScriptCompileException("unexpected '"~token.str~"' when reading ident", token.lineNumber);
+				throw new ScriptCompileException("unexpected '"~token.str~"' when reading ident", token.scriptFilename, token.lineNumber);
 			}
 		}
-
-// FIXME: unary ! doesn't work right
 
 		funcLoop: while(!tokens.empty) {
 			auto peek = tokens.front;
@@ -2040,7 +2529,8 @@ Expression parsePart(MyTokenStreamHere)(ref MyTokenStreamHere tokens) {
 		}
 		return e;
 	}
-	assert(0, to!string(tokens));
+
+	throw new ScriptCompileException("Ran out of tokens when trying to parsePart", null, 0);
 }
 
 Expression parseArguments(MyTokenStreamHere)(ref MyTokenStreamHere tokens, Expression exp, ref Expression[] where) {
@@ -2061,7 +2551,7 @@ Expression parseArguments(MyTokenStreamHere)(ref MyTokenStreamHere tokens, Expre
 	}
 
 	if(tokens.empty)
-		throw new ScriptCompileException("unexpected end of file when parsing call expression", peek.lineNumber);
+		throw new ScriptCompileException("unexpected end of file when parsing call expression", peek.scriptFilename, peek.lineNumber);
 	peek = tokens.front;
 	if(peek.type == ScriptToken.Type.symbol && peek.str == ",") {
 		tokens.popFront();
@@ -2070,17 +2560,17 @@ Expression parseArguments(MyTokenStreamHere)(ref MyTokenStreamHere tokens, Expre
 		tokens.popFront();
 		return exp;
 	} else
-		throw new ScriptCompileException("unexpected '"~peek.str~"' when reading argument list", peek.lineNumber);
+		throw new ScriptCompileException("unexpected '"~peek.str~"' when reading argument list", peek.scriptFilename, peek.lineNumber);
 
 }
 
 Expression parseFunctionCall(MyTokenStreamHere)(ref MyTokenStreamHere tokens, Expression e) {
 	assert(!tokens.empty);
 	auto peek = tokens.front;
-	auto exp = new CallExpression(e);
+	auto exp = new CallExpression(ScriptLocation(peek.scriptFilename, peek.lineNumber), e);
 	tokens.popFront();
 	if(tokens.empty)
-		throw new ScriptCompileException("unexpected end of file when parsing call expression", peek.lineNumber);
+		throw new ScriptCompileException("unexpected end of file when parsing call expression", peek.scriptFilename, peek.lineNumber);
 	return parseArguments(tokens, exp, exp.arguments);
 }
 
@@ -2122,6 +2612,10 @@ Expression parseAddend(MyTokenStreamHere)(ref MyTokenStreamHere tokens) {
 				case ":": // idk
 					return e1;
 
+				case "|>":
+					tokens.popFront();
+					e1 = new PipelineExpression(ScriptLocation(peek.scriptFilename, peek.lineNumber), e1, parseFactor(tokens));
+				break;
 				case ".":
 					tokens.popFront();
 					e1 = new DotVarExpression(e1, parseVariableName(tokens));
@@ -2164,7 +2658,7 @@ Expression parseAddend(MyTokenStreamHere)(ref MyTokenStreamHere tokens) {
 				case "<":
 				case ">":
 					tokens.popFront();
-					e1 = new BinaryExpression(peek.str, e1, parseFactor(tokens));
+					e1 = new BinaryExpression(peek.str, e1, parseAddend(tokens));
 					break;
 				case "+=":
 				case "-=":
@@ -2175,12 +2669,12 @@ Expression parseAddend(MyTokenStreamHere)(ref MyTokenStreamHere tokens) {
 					tokens.popFront();
 					return new OpAssignExpression(peek.str[0..1], e1, parseExpression(tokens));
 				default:
-					throw new ScriptCompileException("Parse error, unexpected " ~ peek.str ~ " when looking for operator", peek.lineNumber);
+					throw new ScriptCompileException("Parse error, unexpected " ~ peek.str ~ " when looking for operator", peek.scriptFilename, peek.lineNumber);
 			}
 		//} else if(peek.type == ScriptToken.Type.identifier || peek.type == ScriptToken.Type.number) {
 			//return parseFactor(tokens);
 		} else
-			throw new ScriptCompileException("Parse error, unexpected '" ~ peek.str ~ "'", peek.lineNumber);
+			throw new ScriptCompileException("Parse error, unexpected '" ~ peek.str ~ "'", peek.scriptFilename, peek.lineNumber);
 	}
 
 	return e1;
@@ -2215,7 +2709,7 @@ Expression parseExpression(MyTokenStreamHere)(ref MyTokenStreamHere tokens, bool
 				case "exit":
 				break;
 				default:
-					throw new ScriptCompileException("unexpected " ~ ident.str ~ ". valid scope(idents) are success, failure, and exit", ident.lineNumber);
+					throw new ScriptCompileException("unexpected " ~ ident.str ~ ". valid scope(idents) are success, failure, and exit", ident.scriptFilename, ident.lineNumber);
 			}
 
 			tokens.requireNextToken(ScriptToken.Type.symbol, ")");
@@ -2297,6 +2791,11 @@ Expression parseExpression(MyTokenStreamHere)(ref MyTokenStreamHere tokens, bool
 					new DotVarExpression(new VariableExpression("__proto"), new VariableExpression("prototype")),
 					new DotVarExpression(new VariableExpression(inheritFrom.str), new VariableExpression("prototype")));
 
+				expressions ~= new AssignExpression(
+					new DotVarExpression(new VariableExpression("__proto"), new VariableExpression("super")),
+					new VariableExpression(inheritFrom.str)
+				);
+
 				// and copying the instance initializer from the parent
 				expressions ~= new ShallowCopyExpression(new VariableExpression("__obj"), new VariableExpression(inheritFrom.str));
 			}
@@ -2365,7 +2864,7 @@ Expression parseExpression(MyTokenStreamHere)(ref MyTokenStreamHere tokens, bool
 							new VariableExpression(ident.str),
 							false),
 						new FunctionLiteralExpression(args, bod, staticScopeBacking));
-				} else throw new ScriptCompileException("Unexpected " ~ tokens.front.str ~ " when reading class decl", tokens.front.lineNumber);
+				} else throw new ScriptCompileException("Unexpected " ~ tokens.front.str ~ " when reading class decl", tokens.front.scriptFilename, tokens.front.lineNumber);
 			}
 
 			tokens.requireNextToken(ScriptToken.Type.symbol, "}");
@@ -2392,6 +2891,51 @@ Expression parseExpression(MyTokenStreamHere)(ref MyTokenStreamHere tokens, bool
 				e.ifFalse = parseExpression(tokens);
 			}
 			ret = e;
+		} else if(tokens.peekNextToken(ScriptToken.Type.keyword, "switch")) {
+			tokens.popFront();
+			auto e = new SwitchExpression();
+			tokens.requireNextToken(ScriptToken.Type.symbol, "(");
+			e.expr = parseExpression(tokens);
+			tokens.requireNextToken(ScriptToken.Type.symbol, ")");
+
+			tokens.requireNextToken(ScriptToken.Type.symbol, "{");
+
+			while(!tokens.peekNextToken(ScriptToken.Type.symbol, "}")) {
+
+				if(tokens.peekNextToken(ScriptToken.Type.keyword, "case")) {
+					auto start = tokens.front;
+					tokens.popFront();
+					auto c = new CaseExpression(parseExpression(tokens));
+					e.cases ~= c;
+					tokens.requireNextToken(ScriptToken.Type.symbol, ":");
+
+					while(!tokens.peekNextToken(ScriptToken.Type.keyword, "default") && !tokens.peekNextToken(ScriptToken.Type.keyword, "case") && !tokens.peekNextToken(ScriptToken.Type.symbol, "}")) {
+						c.expressions ~= parseStatement(tokens);
+						while(tokens.peekNextToken(ScriptToken.Type.symbol, ";"))
+							tokens.popFront();
+					}
+				} else if(tokens.peekNextToken(ScriptToken.Type.keyword, "default")) {
+					tokens.popFront();
+					tokens.requireNextToken(ScriptToken.Type.symbol, ":");
+
+					auto c = new CaseExpression(null);
+
+					while(!tokens.peekNextToken(ScriptToken.Type.keyword, "case") && !tokens.peekNextToken(ScriptToken.Type.symbol, "}")) {
+						c.expressions ~= parseStatement(tokens);
+						while(tokens.peekNextToken(ScriptToken.Type.symbol, ";"))
+							tokens.popFront();
+					}
+
+					e.cases ~= c;
+					e.default_ = c;
+				} else throw new ScriptCompileException("A switch statement must consists of cases and a default, nothing else ", tokens.front.scriptFilename, tokens.front.lineNumber);
+			}
+
+			tokens.requireNextToken(ScriptToken.Type.symbol, "}");
+			expectedEnd = "";
+
+			ret = e;
+
 		} else if(tokens.peekNextToken(ScriptToken.Type.keyword, "foreach")) {
 			tokens.popFront();
 			auto e = new ForeachExpression();
@@ -2468,7 +3012,7 @@ Expression parseExpression(MyTokenStreamHere)(ref MyTokenStreamHere tokens, bool
 			bool hadSomething = false;
 			while(tokens.peekNextToken(ScriptToken.Type.keyword, "catch")) {
 				if(hadSomething)
-					throw new ScriptCompileException("Only one catch block is allowed currently ", tokens.front.lineNumber);
+					throw new ScriptCompileException("Only one catch block is allowed currently ", tokens.front.scriptFilename, tokens.front.lineNumber);
 				hadSomething = true;
 				tokens.popFront();
 				tokens.requireNextToken(ScriptToken.Type.symbol, "(");
@@ -2492,15 +3036,15 @@ Expression parseExpression(MyTokenStreamHere)(ref MyTokenStreamHere tokens, bool
 		} else
 			ret = parseAddend(tokens);
 	} else {
-		assert(0);
+		//assert(0);
 		// return null;
-	//	throw new ScriptCompileException("Parse error, unexpected end of input when reading expression", token.lineNumber);
+		throw new ScriptCompileException("Parse error, unexpected end of input when reading expression", null, 0);//token.lineNumber);
 	}
 
 	//writeln("parsed expression ", ret.toString());
 
 	if(expectedEnd.length && tokens.empty && consumeEnd) // going loose on final ; at the end of input for repl convenience
-		throw new ScriptCompileException("Parse error, unexpected end of input when reading expression, expecting " ~ expectedEnd, first.lineNumber);
+		throw new ScriptCompileException("Parse error, unexpected end of input when reading expression, expecting " ~ expectedEnd, first.scriptFilename, first.lineNumber);
 
 	if(expectedEnd.length && consumeEnd) {
 		 if(tokens.peekNextToken(ScriptToken.Type.symbol, expectedEnd))
@@ -2528,24 +3072,24 @@ VariableDeclaration parseVariableDeclaration(MyTokenStreamHere)(ref MyTokenStrea
 
 	equalOk= true;
 	if(tokens.empty)
-		throw new ScriptCompileException("Parse error, dangling var at end of file", firstToken.lineNumber);
+		throw new ScriptCompileException("Parse error, dangling var at end of file", firstToken.scriptFilename, firstToken.lineNumber);
 
 	Expression initializer;
 	auto identifier = tokens.front;
 	if(identifier.type != ScriptToken.Type.identifier)
-		throw new ScriptCompileException("Parse error, found '"~identifier.str~"' when expecting var identifier", identifier.lineNumber);
+		throw new ScriptCompileException("Parse error, found '"~identifier.str~"' when expecting var identifier", identifier.scriptFilename, identifier.lineNumber);
 
 	tokens.popFront();
 
 	tryTermination:
 	if(tokens.empty)
-		throw new ScriptCompileException("Parse error, missing ; after var declaration at end of file", firstToken.lineNumber);
+		throw new ScriptCompileException("Parse error, missing ; after var declaration at end of file", firstToken.scriptFilename, firstToken.lineNumber);
 
 	auto peek = tokens.front;
 	if(peek.type == ScriptToken.Type.symbol) {
 		if(peek.str == "=") {
 			if(!equalOk)
-				throw new ScriptCompileException("Parse error, unexpected '"~identifier.str~"' after reading var initializer", peek.lineNumber);
+				throw new ScriptCompileException("Parse error, unexpected '"~identifier.str~"' after reading var initializer", peek.scriptFilename, peek.lineNumber);
 			equalOk = false;
 			tokens.popFront();
 			initializer = parseExpression(tokens);
@@ -2561,9 +3105,9 @@ VariableDeclaration parseVariableDeclaration(MyTokenStreamHere)(ref MyTokenStrea
 			//tokens = tokens[1 .. $];
 			// we're done!
 		} else
-			throw new ScriptCompileException("Parse error, unexpected '"~peek.str~"' when reading var declaration", peek.lineNumber);
+			throw new ScriptCompileException("Parse error, unexpected '"~peek.str~"' when reading var declaration", peek.scriptFilename, peek.lineNumber);
 	} else
-		throw new ScriptCompileException("Parse error, unexpected '"~peek.str~"' when reading var declaration", peek.lineNumber);
+		throw new ScriptCompileException("Parse error, unexpected '"~peek.str~"' when reading var declaration", peek.scriptFilename, peek.lineNumber);
 
 	return decl;
 }
@@ -2633,6 +3177,7 @@ Expression parseStatement(MyTokenStreamHere)(ref MyTokenStreamHere tokens, strin
 						goto case; // handle it like any other expression
 					}
 				case "json!{":
+				case "#{":
 				case "[":
 				case "(":
 				case "null":
@@ -2647,15 +3192,22 @@ Expression parseStatement(MyTokenStreamHere)(ref MyTokenStreamHere tokens, strin
 				case "class":
 				case "new":
 
+				case "super":
+
 				// flow control
 				case "if":
 				case "while":
 				case "for":
 				case "foreach":
+				case "switch":
 
 				// exceptions
 				case "try":
 				case "throw":
+
+				// evals
+				case "eval":
+				case "mixin":
 
 				// flow
 				case "continue":
@@ -2666,13 +3218,14 @@ Expression parseStatement(MyTokenStreamHere)(ref MyTokenStreamHere tokens, strin
 				case "!":
 				case "~":
 				case "-":
+					return parseExpression(tokens);
 
 				// BTW add custom object operator overloading to struct var
 				// and custom property overloading to PrototypeObject
 
 				default:
 					// whatever else keyword or operator related is actually illegal here
-					throw new ScriptCompileException("Parse error, unexpected " ~ token.str, token.lineNumber);
+					throw new ScriptCompileException("Parse error, unexpected " ~ token.str, token.scriptFilename, token.lineNumber);
 			}
 		// break;
 		case ScriptToken.Type.identifier:
@@ -2719,7 +3272,7 @@ struct CompoundStatementRange(MyTokenStreamHere) {
 		}
 
 		if(tokens.empty && terminatingSymbol !is null) {
-			throw new ScriptCompileException("Reached end of file while trying to reach matching " ~ terminatingSymbol, startingLine);
+			throw new ScriptCompileException("Reached end of file while trying to reach matching " ~ terminatingSymbol, null, startingLine);
 		}
 
 		if(terminatingSymbol !is null) {
@@ -2842,7 +3395,9 @@ var interpret(string code, PrototypeObject variables, string scriptFilename = nu
 	Returns:
 		the result of the last expression evaluated by the script engine
 +/
-var interpret(string code, var variables = null, string scriptFilename = null) {
+var interpret(string code, var variables = null, string scriptFilename = null, string file = __FILE__, size_t line = __LINE__) {
+	if(scriptFilename is null)
+		scriptFilename = file ~ "@" ~ to!string(line);
 	return interpretStream(
 		lexScript(repeat(code, 1), scriptFilename),
 		(variables.payloadType() == var.Type.Object && variables._payload._object !is null) ? variables._payload._object : new PrototypeObject());
@@ -2855,19 +3410,48 @@ var interpretFile(File file, var globals) {
 		(globals.payloadType() == var.Type.Object && globals._payload._object !is null) ? globals._payload._object : new PrototypeObject());
 }
 
-///
-void repl(var globals) {
-	import std.stdio;
+/// Enhanced repl uses arsd.terminal for better ux. Added April 26, 2020. Default just uses std.stdio.
+void repl(bool enhanced = false)(var globals) {
+	static if(enhanced) {
+		import arsd.terminal;
+		Terminal terminal = Terminal(ConsoleOutputMode.linear);
+		auto lines() {
+			struct Range {
+				string line;
+				string front() { return line; }
+				bool empty() { return line is null; }
+				void popFront() { line = terminal.getline(": "); terminal.writeln(); }
+			}
+			Range r;
+			r.popFront();
+			return r;
+			
+		}
+
+		void writeln(T...)(T t) {
+			terminal.writeln(t);
+			terminal.flush();
+		}
+	} else {
+		import std.stdio;
+		auto lines() { return stdin.byLine; }
+	}
+
+	bool exited;
+	if(globals == null)
+		globals = var.emptyObject;
+	globals.exit = () { exited = true; };
+
 	import std.algorithm;
 	auto variables = (globals.payloadType() == var.Type.Object && globals._payload._object !is null) ? globals._payload._object : new PrototypeObject();
 
 	// we chain to ensure the priming popFront succeeds so we don't throw here
 	auto tokens = lexScript(
-		chain(["var __skipme = 0;"], map!((a) => a.idup)(stdin.byLine))
+		chain(["var __skipme = 0;"], map!((a) => a.idup)(lines))
 	, "stdin");
 	auto expressions = parseScript(tokens);
 
-	while(!expressions.empty) {
+	while(!exited && !expressions.empty) {
 		try {
 			expressions.popFront;
 			auto expression = expressions.front;
@@ -2880,5 +3464,16 @@ void repl(var globals) {
 		} catch(Exception e) {
 			writeln("*** ", e.msg);
 		}
+	}
+}
+
+class ScriptFunctionMetadata : VarMetadata {
+	FunctionLiteralExpression fle;
+	this(FunctionLiteralExpression fle) {
+		this.fle = fle;
+	}
+
+	string convertToString() {
+		return fle.toString();
 	}
 }

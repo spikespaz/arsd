@@ -1,4 +1,4 @@
-/// PNG file handling for color.d's Image interfaces
+/// PNG file read and write. Leverages color.d's Image interfaces for interop.
 module arsd.png;
 
 import core.memory;
@@ -684,6 +684,11 @@ void addImageDatastreamToPng(const(ubyte)[] data, PNG* png) {
 	import std.zlib;
 
 	PngHeader h = getHeader(png);
+
+	if(h.depth == 0)
+		throw new Exception("depth of zero makes no sense");
+	if(h.width == 0)
+		throw new Exception("width zero?!!?!?!");
 
 	size_t bytesPerLine;
 	switch(h.type) {

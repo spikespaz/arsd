@@ -1,5 +1,13 @@
-/**
+/++
 
+	Provides a polling-based API to use gamepads/joysticks on Linux and Windows.
+
+	Pass `-version=ps1_style` or `-version=xbox_style` to pick your API style - the constants will use the names of the buttons on those controllers and attempt to emulate the other. ps1_style is compatible with more hardware and thus the default. XBox controllers work with either, though.
+
+	The docs for this file are quite weak, I suggest you view source of [arsd.gamehelers] for an example of how it might be used.
++/
+
+/*
 	FIXME: a simple function to integrate with sdpy event loop. templated function
 
 	HIGH LEVEL NOTES
@@ -107,6 +115,10 @@ version(xbox_style) {
 
 version(Windows) {
 	WindowsXInput wxi;
+}
+
+version(OSX) {
+	struct JoystickState {}
 }
 
 JoystickState[4] joystickState;
@@ -403,6 +415,14 @@ struct JoystickUpdate {
 	}
 
 	static short normalizeAxis(short value) {
+	/+
+		auto v = normalizeAxisHack(value);
+		import std.stdio;
+		writeln(value, " :: ", v);
+		return v;
+	}
+	static short normalizeAxisHack(short value) {
+	+/
 		if(value > -1600 && value < 1600)
 			return 0; // the deadzone gives too much useless junk
 		return cast(short) (value >>> 11);
@@ -498,7 +518,7 @@ struct JoystickUpdate {
 			final switch(axis) {
 				case PS1AnalogAxes.horizontalDpad:
 				case PS1AnalogAxes.horizontalLeftStick:
-					short got = (what.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT) ? -digitalFallbackValue :
+					short got = (what.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT) ? cast(short)-cast(int)digitalFallbackValue :
 					       (what.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT) ? digitalFallbackValue :
 					       0;
 					if(got == 0)
@@ -508,10 +528,13 @@ struct JoystickUpdate {
 				case PS1AnalogAxes.verticalDpad:
 				case PS1AnalogAxes.verticalLeftStick:
 					short got = (what.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_UP) ? digitalFallbackValue :
-					       (what.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN) ? -digitalFallbackValue :
+					       (what.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN) ? cast(short)-cast(int)digitalFallbackValue :
 						what.Gamepad.sThumbLY;
 
-					return normalizeAxis(-got);
+					if(got == short.min)
+						got++; // to avoid overflow on the axis inversion below
+
+					return normalizeAxis(cast(short)-cast(int)got);
 				case PS1AnalogAxes.horizontalRightStick:
 					return normalizeAxis(what.Gamepad.sThumbRX);
 				case PS1AnalogAxes.verticalRightStick:

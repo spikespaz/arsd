@@ -1,4 +1,8 @@
-///
+/++
+	Converts HTML to plain text. Can also output VT escape sequences for terminal output.
+
+	The exact output of this is subject to change - it is just what appears nice for me. (I actually use this on my personal email setup.)
++/
 module arsd.htmltotext;
 
 import arsd.dom;
@@ -464,6 +468,6 @@ class HtmlConverter {
 ///
 string htmlToText(string html, bool wantWordWrap = true, int wrapAmount = 74) {
 	auto converter = new HtmlConverter();
-	return converter.convert(html, true, wrapAmount);
+	return converter.convert(html, wantWordWrap, wrapAmount);
 }
 

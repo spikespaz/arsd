@@ -1,4 +1,7 @@
 /**
+	My old toy html widget build out of my libraries. Not great, you probably don't want to use it.
+
+
 	This module has a lot of dependencies
 
 	dmd yourapp.d arsd/htmlwidget.d arsd/simpledisplay.d arsd/curl.d arsd/color.d arsd/dom.d arsd/characterencodings.d arsd/imagedraft.d -J. -version=browser
@@ -1032,7 +1035,7 @@ void addEventListener(string event, Element what, EventHandler handler, bool bub
 		l.capturingEventHandlers[event] ~= handler;
 }
 
-void addEventListener(string event, Element what[], EventHandler handler, bool bubble = true) {
+void addEventListener(string event, Element[] what, EventHandler handler, bool bubble = true) {
 	foreach(w; what)
 		addEventListener(event, w, handler, bubble);
 }

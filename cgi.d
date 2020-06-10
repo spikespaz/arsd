@@ -3,6 +3,8 @@
 
 // FIXME: cgi per-request arena allocator
 
+// i need to add a bunch of type templates for validations... mayne @NotNull or NotNull!
+
 // FIXME: I might make a cgi proxy class which can change things; the underlying one is still immutable
 // but the later one can edit and simplify the api. You'd have to use the subclass tho!
 
@@ -70,34 +72,77 @@ void main() {
 	mixin GenericMain!hello;
 	---
 
+	Test on console (works in any interface mode):
+	$(CONSOLE
+		$ ./cgi_hello GET / name=whatever
+	)
+
+	If using http version (default on `dub` builds, or on custom builds when passing `-version=embedded_httpd` to dmd):
+	$(CONSOLE
+		$ ./cgi_hello --port 8080
+		# now you can go to http://localhost:8080/?name=whatever
+	)
+
 
 	Compile_versions:
 
-		-version=plain_cgi
-			The default - a traditional, plain CGI executable will be generated.
-		-version=fastcgi
-			A FastCGI executable will be generated.
-		-version=scgi
-			A SCGI (SimpleCGI) executable will be generated.
-		-version=embedded_httpd
-			A HTTP server will be embedded in the generated executable.
-		-version=embedded_httpd_threads
-			The embedded HTTP server will use a single process with a thread pool.
-		-version=embedded_httpd_processes
-			The embedded HTTP server will use a prefork style process pool.
+	If you are using `dub`, use:
 
-		-version=cgi_with_websocket
-			The CGI class has websocket server support.
+	```sdlang
+	subConfiguration "arsd-official:cgi" "VALUE_HERE"
+	```
 
-		-version=with_openssl # not currently used
+	or to dub.json:
 
-		-version=embedded_httpd_processes_accept_after_fork
-			It will call accept() in each child process, after forking. This is currently the only option, though I am experimenting with other ideas.
+	```json
+        	"subConfigurations": {"arsd-official:cgi": "VALUE_HERE"}
+	```
 
-		-version=cgi_embedded_sessions
-			The session server will be embedded in the cgi.d server process
-		-version=cgi_session_server_process
-			The session will be provided in a separate process, provided by cgi.d.
+	to change versions. The possible options for `VALUE_HERE` are:
+
+	$(LIST
+		* `embedded_httpd` for the embedded httpd version (built-in web server). This is the default.
+		* `cgi` for traditional cgi binaries.
+		* `fastcgi` for FastCGI builds.
+		* `scgi` for SCGI builds.
+	)
+
+	With dmd, use:
+
+	$(TABLE_ROWS
+
+		* + Interfaces
+		  + (mutually exclusive)
+
+		* - `-version=plain_cgi`
+			- The default building the module alone without dub - a traditional, plain CGI executable will be generated.
+		* - `-version=embedded_httpd`
+			- A HTTP server will be embedded in the generated executable. This is default when building with dub.
+		* - `-version=fastcgi`
+			- A FastCGI executable will be generated.
+		* - `-version=scgi`
+			- A SCGI (SimpleCGI) executable will be generated.
+
+		* - `-version=embedded_httpd_threads`
+			- The embedded HTTP server will use a single process with a thread pool. (use instead of plain `embedded_httpd` if you want this specific implementation)
+		* - `-version=embedded_httpd_processes`
+			- The embedded HTTP server will use a prefork style process pool. (use instead of plain `embedded_httpd` if you want this specific implementation)
+		* - `-version=embedded_httpd_processes_accept_after_fork`
+			- It will call accept() in each child process, after forking. This is currently the only option, though I am experimenting with other ideas. You probably should NOT specify this right now.
+
+		* + Tweaks
+		  + (can be used together with others)
+
+		* - `-version=cgi_with_websocket`
+			- The CGI class has websocket server support.
+
+		* - `-version=with_openssl`
+			- not currently used
+		* - `-version=cgi_embedded_sessions`
+			- The session server will be embedded in the cgi.d server process
+		* - `-version=cgi_session_server_process`
+			- The session will be provided in a separate process, provided by cgi.d.
+	)
 
 	Compile_and_run:
 	
@@ -297,6 +342,26 @@ static import std.file;
 // for a single thread, linear request thing, use:
 // -version=embedded_httpd_threads -version=cgi_no_threads
 
+version(Posix) {
+	version(CRuntime_Musl) {
+
+	} else version(minimal) {
+
+	} else {
+		version(GNU) {
+			// GDC doesn't support static foreach so I had to cheat on it :(
+		} else {
+			version=with_breaking_cgi_features;
+			version=with_sendfd;
+			version=with_addon_servers;
+		}
+	}
+}
+
+// the servers must know about the connections to talk to them; the interfaces are vital
+version(with_addon_servers)
+	version=with_addon_servers_connections;
+
 version(embedded_httpd) {
 	version(linux)
 		version=embedded_httpd_processes;
@@ -430,6 +495,12 @@ mixin template ForwardCgiConstructors() {
 	this(BufferedInputRange ir, bool* closeConnection) { super(ir, closeConnection); }
 }
 
+/// thrown when a connection is closed remotely while we waiting on data from it
+class ConnectionClosedException : Exception {
+	this(string message, string file = __FILE__, size_t line = __LINE__, Throwable next = null) {
+		super(message, file, line, next);
+	}
+}
 
  
 version(Windows) {
@@ -1521,10 +1592,19 @@ class Cgi {
 		immutable(ubyte)[] data;
 
 		void rdo(const(ubyte)[] d) {
+		//import std.stdio; writeln(d);
 			sendAll(ir.source, d);
 		}
 
-		this(ir, ir.source.remoteAddress().toString(), 80 /* FIXME */, 0, false, &rdo, null, closeConnection);
+		auto ira = ir.source.remoteAddress();
+
+		// that check for UnixAddress is to work around a Phobos bug
+		// see: https://github.com/dlang/phobos/pull/7383
+		// but this might be more useful anyway tbh for this case
+		version(Posix)
+		this(ir, cast(UnixAddress) ira ? "unix:" : ira.toString(), 80 /* FIXME */, 0, false, &rdo, null, closeConnection);
+		else
+		this(ir, ira.toString(), 80 /* FIXME */, 0, false, &rdo, null, closeConnection);
 	}
 
 	/**
@@ -1711,6 +1791,7 @@ class Cgi {
 					if(name != "host" || host is null)
 						host = value;
 				}
+				// FIXME: https://tools.ietf.org/html/rfc7239
 				else if (name == "accept-encoding") {
 					if(value.indexOf("gzip") != -1)
 						acceptsGzip = true;
@@ -1924,9 +2005,20 @@ class Cgi {
 		setCache(true); // need to enable caching so the date has meaning
 
 		responseIsPublic = isPublic;
+		responseExpiresRelative = false;
+	}
+
+	/// Sets a cache-control max-age header for whenFromNow, in seconds.
+	void setResponseExpiresRelative(int whenFromNow, bool isPublic = false) {
+		responseExpires = whenFromNow;
+		setCache(true); // need to enable caching so the date has meaning
+
+		responseIsPublic = isPublic;
+		responseExpiresRelative = true;
 	}
 	private long responseExpires = long.min;
 	private bool responseIsPublic = false;
+	private bool responseExpiresRelative = false;
 
 	/// This is like setResponseExpires, but it can be called multiple times. The setting most in the past is the one kept.
 	/// If you have multiple functions, they all might call updateResponseExpires about their own return value. The program
@@ -2037,11 +2129,15 @@ class Cgi {
 			hd ~= "Location: " ~ responseLocation;
 		}
 		if(!noCache && responseExpires != long.min) { // an explicit expiration date is set
-			auto expires = SysTime(unixTimeToStdTime(cast(int)(responseExpires / 1000)), UTC());
-			hd ~= "Expires: " ~ printDate(
-				cast(DateTime) expires);
-			// FIXME: assuming everything is private unless you use nocache - generally right for dynamic pages, but not necessarily
-			hd ~= "Cache-Control: "~(responseIsPublic ? "public" : "private")~", no-cache=\"set-cookie, set-cookie2\"";
+			if(responseExpiresRelative) {
+				hd ~= "Cache-Control: "~(responseIsPublic ? "public" : "private")~", max-age="~to!string(responseExpires)~", no-cache=\"set-cookie, set-cookie2\"";
+			} else {
+				auto expires = SysTime(unixTimeToStdTime(cast(int)(responseExpires / 1000)), UTC());
+				hd ~= "Expires: " ~ printDate(
+					cast(DateTime) expires);
+				// FIXME: assuming everything is private unless you use nocache - generally right for dynamic pages, but not necessarily
+				hd ~= "Cache-Control: "~(responseIsPublic ? "public" : "private")~", no-cache=\"set-cookie, set-cookie2\"";
+			}
 		}
 		if(responseCookies !is null && responseCookies.length > 0) {
 			foreach(c; responseCookies)
@@ -2088,13 +2184,24 @@ class Cgi {
 		foreach(h; hd) {
 			if(rawDataOutput !is null)
 				rawDataOutput(cast(const(ubyte)[]) (h ~ "\r\n"));
-			else
-				writeln(h);
+			else {
+				version(CRuntime_Musl) {
+					stdout.rawWrite(h);
+					stdout.rawWrite("\n");
+				} else {
+					writeln(h);
+				}
+			}
 		}
 		if(rawDataOutput !is null)
 			rawDataOutput(cast(const(ubyte)[]) ("\r\n"));
-		else
-			writeln("");
+		else {
+			version(CRuntime_Musl) {
+				stdout.rawWrite("\n");
+			} else {
+				writeln("");
+			}
+		}
 
 		outputtedResponseData = true;
 	}
@@ -2278,6 +2385,7 @@ class Cgi {
 	}
 
 	// if it is in test mode; triggers mock sessions. Used by CgiTester
+	version(with_breaking_cgi_features)
 	private CgiTester testInProcess;
 
 	/* Hooks for redirecting input and output */
@@ -2391,6 +2499,7 @@ Cgi dummyCgi(Cgi.RequestMethod method = Cgi.RequestMethod.GET, string url = null
 /++
 	A helper test class for request handler unittests.
 +/
+version(with_breaking_cgi_features)
 class CgiTester {
 	private {
 		SessionObject[TypeInfo] mockSessions;
@@ -3083,19 +3192,32 @@ void cgiMainImpl(alias fun, CustomCgi = Cgi, long maxContentLength = defaultMaxC
 		// run the special separate processes if needed
 		switch(args[1]) {
 			case "--websocket-server":
-				runWebsocketServer();
+				version(with_addon_servers)
+					runWebsocketServer();
+				else
+					printf("Add-on servers not compiled in.");
 				return;
 			case "--session-server":
-				runSessionServer();
+				version(with_addon_servers)
+					runSessionServer();
+				else
+					printf("Add-on servers not compiled in.");
 				return;
 			case "--event-server":
-				runEventServer();
+				version(with_addon_servers)
+					runEventServer();
+				else
+					printf("Add-on servers not compiled in.");
 				return;
 			case "--timer-server":
-				runTimerServer();
+				version(with_addon_servers)
+					runTimerServer();
+				else
+					printf("Add-on servers not compiled in.");
 				return;
 			case "--timed-jobs":
 				import core.demangle;
+				version(with_addon_servers_connections)
 				foreach(k, v; scheduledJobHandlers)
 					writeln(k, "\t", demangle(k));
 				return;
@@ -3259,7 +3381,14 @@ void cgiMainImpl(alias fun, CustomCgi = Cgi, long maxContentLength = defaultMaxC
 							} catch(Throwable t) {
 								// a construction error is either bad code or bad request; bad request is what it should be since this is bug free :P
 								// anyway let's kill the connection
-								stderr.writeln(t.toString());
+								version(CRuntime_Musl) {
+									// LockingTextWriter fails here
+									// so working around it
+									auto estr = t.toString();
+									stderr.rawWrite(estr);
+									stderr.rawWrite("\n");
+								} else
+									stderr.writeln(t.toString());
 								sendAll(ir.source, plainHttpError(false, "400 Bad Request", t));
 								closeConnection = true;
 								break;
@@ -3271,11 +3400,20 @@ void cgiMainImpl(alias fun, CustomCgi = Cgi, long maxContentLength = defaultMaxC
 							try {
 								fun(cgi);
 								cgi.close();
+								if(cgi.websocketMode)
+									closeConnection = true;
 							} catch(ConnectionException ce) {
 								closeConnection = true;
 							} catch(Throwable t) {
 								// a processing error can be recovered from
-								stderr.writeln(t.toString);
+								version(CRuntime_Musl) {
+									// LockingTextWriter fails here
+									// so working around it
+									auto estr = t.toString();
+									stderr.rawWrite(estr);
+								} else {
+									stderr.writeln(t.toString);
+								}
 								if(!handleException(cgi, t))
 									closeConnection = true;
 							}
@@ -3294,6 +3432,7 @@ void cgiMainImpl(alias fun, CustomCgi = Cgi, long maxContentLength = defaultMaxC
 
 						ir.source.close();
 					} catch(Throwable t) {
+						version(CRuntime_Musl) {} else
 						debug writeln(t);
 						// most likely cause is a timeout
 					}
@@ -3359,7 +3498,9 @@ void cgiMainImpl(alias fun, CustomCgi = Cgi, long maxContentLength = defaultMaxC
 
 			int status;
 			while(-1 != wait(&status)) {
+				version(CRuntime_Musl) {} else {
 				import std.stdio; writeln("Process died ", status);
+				}
 				processCount--;
 				goto reopen;
 			}
@@ -3472,10 +3613,18 @@ void cgiMainImpl(alias fun, CustomCgi = Cgi, long maxContentLength = defaultMaxC
 				cgi._outputFileHandle = GetStdHandle(STD_OUTPUT_HANDLE);
 			else static assert(0);
 		} catch(Throwable t) {
-			stderr.writeln(t.msg);
-			// the real http server will probably handle this;
-			// most likely, this is a bug in Cgi. But, oh well.
-			stdout.write(plainHttpError(true, "400 Bad Request", t));
+			version(CRuntime_Musl) {
+				// LockingTextWriter fails here
+				// so working around it
+				auto s = t.toString();
+				stderr.rawWrite(s);
+				stdout.rawWrite(plainHttpError(true, "400 Bad Request", t));
+			} else {
+				stderr.writeln(t.msg);
+				// the real http server will probably handle this;
+				// most likely, this is a bug in Cgi. But, oh well.
+				stdout.write(plainHttpError(true, "400 Bad Request", t));
+			}
 			return;
 		}
 		assert(cgi !is null);
@@ -3485,7 +3634,14 @@ void cgiMainImpl(alias fun, CustomCgi = Cgi, long maxContentLength = defaultMaxC
 			fun(cgi);
 			cgi.close();
 		} catch (Throwable t) {
-			stderr.writeln(t.msg);
+			version(CRuntime_Musl) {
+				// LockingTextWriter fails here
+				// so working around it
+				auto s = t.msg;
+				stderr.rawWrite(s);
+			} else {
+				stderr.writeln(t.msg);
+			}
 			if(!handleException(cgi, t))
 				return;
 		}
@@ -3524,7 +3680,12 @@ void doThreadHttpConnection(CustomCgi, alias fun)(Socket connection) {
 		} catch(Throwable t) {
 			// a construction error is either bad code or bad request; bad request is what it should be since this is bug free :P
 			// anyway let's kill the connection
-			stderr.writeln(t.toString());
+			version(CRuntime_Musl) {
+				stderr.rawWrite(t.toString());
+				stderr.rawWrite("\n");
+			} else {
+				stderr.writeln(t.toString());
+			}
 			sendAll(connection, plainHttpError(false, "400 Bad Request", t));
 			closeConnection = true;
 			break;
@@ -3536,11 +3697,14 @@ void doThreadHttpConnection(CustomCgi, alias fun)(Socket connection) {
 		try {
 			fun(cgi);
 			cgi.close();
+			if(cgi.websocketMode)
+				closeConnection = true;
 		} catch(ConnectionException ce) {
 			// broken pipe or something, just abort the connection
 			closeConnection = true;
 		} catch(Throwable t) {
 			// a processing error can be recovered from
+			version(CRuntime_Musl) {} else
 			stderr.writeln(t.toString);
 			if(!handleException(cgi, t))
 				closeConnection = true;
@@ -3585,7 +3749,13 @@ void doThreadScgiConnection(CustomCgi, alias fun, long maxContentLength)(Socket 
 	// waiting for colon for header length
 	auto idx = indexOf(cast(string) chunk, ':');
 	if(idx == -1) {
-		range.popFront();
+		try {
+			range.popFront();
+		} catch(Exception e) {
+			// it is just closed, no big deal
+			connection.close();
+			return;
+		}
 		goto more_data;
 	}
 
@@ -3677,19 +3847,19 @@ string printDate(DateTime date) {
 // to actually put the symbol in the object file. I guess the immutable
 // assoc array array isn't actually included in druntime
 void hackAroundLinkerError() {
-      writeln(typeid(const(immutable(char)[][])[immutable(char)[]]));
-      writeln(typeid(immutable(char)[][][immutable(char)[]]));
-      writeln(typeid(Cgi.UploadedFile[immutable(char)[]]));
-      writeln(typeid(Cgi.UploadedFile[][immutable(char)[]]));
-      writeln(typeid(immutable(Cgi.UploadedFile)[immutable(char)[]]));
-      writeln(typeid(immutable(Cgi.UploadedFile[])[immutable(char)[]]));
-      writeln(typeid(immutable(char[])[immutable(char)[]]));
+      stdout.rawWrite(typeid(const(immutable(char)[][])[immutable(char)[]]).toString());
+      stdout.rawWrite(typeid(immutable(char)[][][immutable(char)[]]).toString());
+      stdout.rawWrite(typeid(Cgi.UploadedFile[immutable(char)[]]).toString());
+      stdout.rawWrite(typeid(Cgi.UploadedFile[][immutable(char)[]]).toString());
+      stdout.rawWrite(typeid(immutable(Cgi.UploadedFile)[immutable(char)[]]).toString());
+      stdout.rawWrite(typeid(immutable(Cgi.UploadedFile[])[immutable(char)[]]).toString());
+      stdout.rawWrite(typeid(immutable(char[])[immutable(char)[]]).toString());
       // this is getting kinda ridiculous btw. Moving assoc arrays
       // to the library is the pain that keeps on coming.
 
       // eh this broke the build on the work server
-      // writeln(typeid(immutable(char)[][immutable(string[])]));
-      writeln(typeid(immutable(string[])[immutable(char)[]]));
+      // stdout.rawWrite(typeid(immutable(char)[][immutable(string[])]));
+      stdout.rawWrite(typeid(immutable(string[])[immutable(char)[]]).toString());
 }
 
 
@@ -3804,18 +3974,20 @@ class BufferedInputRange {
 	*/
 	void popFront(size_t maxBytesToConsume = 0 /*size_t.max*/, size_t minBytesToSettleFor = 0, bool skipConsume = false) {
 		if(sourceClosed)
-			throw new Exception("can't get any more data from a closed source");
+			throw new ConnectionClosedException("can't get any more data from a closed source");
 		if(!skipConsume)
 			consume(maxBytesToConsume);
 
 		// we might have to grow the buffer
 		if(minBytesToSettleFor > underlyingBuffer.length || view.length == underlyingBuffer.length) {
 			if(allowGrowth) {
+			//import std.stdio; writeln("growth");
 				auto viewStart = view.ptr - underlyingBuffer.ptr;
 				size_t growth = 4096;
 				// make sure we have enough for what we're being asked for
-				if(minBytesToSettleFor - underlyingBuffer.length > growth)
+				if(minBytesToSettleFor > 0 && minBytesToSettleFor - underlyingBuffer.length > growth)
 					growth = minBytesToSettleFor - underlyingBuffer.length;
+				//import std.stdio; writeln(underlyingBuffer.length, " ", viewStart, " ", view.length, " ", growth,  " ", minBytesToSettleFor, " ", minBytesToSettleFor - underlyingBuffer.length);
 				underlyingBuffer.length += growth;
 				view = underlyingBuffer[viewStart .. view.length];
 			} else
@@ -3823,7 +3995,7 @@ class BufferedInputRange {
 		}
 
 		do {
-			auto freeSpace = underlyingBuffer[underlyingBuffer.ptr - view.ptr + view.length .. $];
+			auto freeSpace = underlyingBuffer[view.ptr - underlyingBuffer.ptr + view.length .. $];
 			try_again:
 			auto ret = source.receive(freeSpace);
 			if(ret == Socket.ERROR) {
@@ -3845,6 +4017,7 @@ class BufferedInputRange {
 				return;
 			}
 
+			//import std.stdio; writeln(view.ptr); writeln(underlyingBuffer.ptr); writeln(view.length, " ", ret, " = ", view.length + ret);
 			view = underlyingBuffer[view.ptr - underlyingBuffer.ptr .. view.length + ret];
 		} while(view.length < minBytesToSettleFor);
 	}
@@ -3856,6 +4029,7 @@ class BufferedInputRange {
 	/// You do not need to call this if you always want to wait for more data when you
 	/// consume some.
 	ubyte[] consume(size_t bytes) {
+		//import std.stdio; writeln("consuime ", bytes, "/", view.length);
 		view = view[bytes > $ ? $ : bytes .. $];
 		if(view.length == 0) {
 			view = underlyingBuffer[0 .. 0]; // go ahead and reuse the beginning
@@ -4075,6 +4249,7 @@ class ListeningConnectionManager {
 			version(linux) {
 				listener = new Socket(AddressFamily.UNIX, SocketType.STREAM);
 				string filename = "\0" ~ host["abstract:".length .. $];
+				import std.stdio; stderr.writeln("Listening to abstract unix domain socket: ", host["abstract:".length .. $]);
 				listener.bind(new UnixAddress(filename));
 				tcp = false;
 			} else {
@@ -4218,7 +4393,7 @@ class ConnectionThread : Thread {
 				}
 				+/
 			} catch(Throwable e) {
-				import std.stdio; writeln(e);
+				import std.stdio; stderr.rawWrite(e.toString); stderr.rawWrite("\n");
 				socket.close();
 			}
 		}
@@ -4489,6 +4664,37 @@ version(cgi_with_websocket) {
 
 		// returns true if data available, false if it timed out
 		bool recvAvailable(Duration timeout = dur!"msecs"(0)) {
+			if(!waitForNextMessageWouldBlock())
+				return true;
+			if(isDataPending(timeout))
+				return true; // this is kinda a lie.
+
+			return false;
+		}
+
+		public bool lowLevelReceive() {
+			auto bfr = cgi.idlol;
+			top:
+			auto got = bfr.front;
+			if(got.length) {
+				if(receiveBuffer.length < receiveBufferUsedLength + got.length)
+					receiveBuffer.length += receiveBufferUsedLength + got.length;
+
+				receiveBuffer[receiveBufferUsedLength .. receiveBufferUsedLength + got.length] = got[];
+				receiveBufferUsedLength += got.length;
+				bfr.consume(got.length);
+
+				return true;
+			}
+
+			bfr.popFront(0);
+			if(bfr.sourceClosed)
+				return false;
+			goto top;
+		}
+
+
+		bool isDataPending(Duration timeout = 0.seconds) {
 			Socket socket = cgi.idlol.source;
 
 			auto check = new SocketSet();
@@ -4501,52 +4707,298 @@ version(cgi_with_websocket) {
 		}
 
 		// note: this blocks
-		WebSocketMessage recv() {
-			// FIXME: should we automatically handle pings and pongs?
-			assert(!cgi.idlol.empty());
-			cgi.idlol.popFront(0);
-
-			WebSocketMessage message;
-
-			auto info = cgi.idlol.front();
-
-			// FIXME: read should prolly take the whole range so it can request more if needed
-			// read should also go ahead and consume the range
-			message = WebSocketMessage.read(info);
-
-			cgi.idlol.consume(info.length);
-
-			return message;
+		WebSocketFrame recv() {
+			return waitForNextMessage();
 		}
 
-		void send(in char[] text) {
-			// I cast away const here because I know this msg is private and it doesn't write
-			// to that buffer unless masking is set... which it isn't, so we're ok.
-			auto msg = WebSocketMessage.simpleMessage(WebSocketOpcode.text, cast(void[]) text);
-			msg.send(cgi);
+
+
+
+		private void llclose() {
+			cgi.close();
 		}
 
-		void send(in ubyte[] binary) {
-			// I cast away const here because I know this msg is private and it doesn't write
-			// to that buffer unless masking is set... which it isn't, so we're ok.
-			auto msg = WebSocketMessage.simpleMessage(WebSocketOpcode.binary, cast(void[]) binary);
-			msg.send(cgi);
+		private void llsend(ubyte[] data) {
+			cgi.write(data);
+			cgi.flush();
 		}
 
-		void close() {
-			auto msg = WebSocketMessage.simpleMessage(WebSocketOpcode.close, null);
-			msg.send(cgi);
+		void unregisterActiveSocket(WebSocket) {}
+
+		/* copy/paste section { */
+
+		private int readyState_;
+		private ubyte[] receiveBuffer;
+		private size_t receiveBufferUsedLength;
+
+		private Config config;
+
+		enum CONNECTING = 0; /// Socket has been created. The connection is not yet open.
+		enum OPEN = 1; /// The connection is open and ready to communicate.
+		enum CLOSING = 2; /// The connection is in the process of closing.
+		enum CLOSED = 3; /// The connection is closed or couldn't be opened.
+
+		/++
+
+		+/
+		/// Group: foundational
+		static struct Config {
+			/++
+				These control the size of the receive buffer.
+
+				It starts at the initial size, will temporarily
+				balloon up to the maximum size, and will reuse
+				a buffer up to the likely size.
+
+				Anything larger than the maximum size will cause
+				the connection to be aborted and an exception thrown.
+				This is to protect you against a peer trying to
+				exhaust your memory, while keeping the user-level
+				processing simple.
+			+/
+			size_t initialReceiveBufferSize = 4096;
+			size_t likelyReceiveBufferSize = 4096; /// ditto
+			size_t maximumReceiveBufferSize = 10 * 1024 * 1024; /// ditto
+
+			/++
+				Maximum combined size of a message.
+			+/
+			size_t maximumMessageSize = 10 * 1024 * 1024;
+
+			string[string] cookies; /// Cookies to send with the initial request. cookies[name] = value;
+			string origin; /// Origin URL to send with the handshake, if desired.
+			string protocol; /// the protocol header, if desired.
+
+			int pingFrequency = 5000; /// Amount of time (in msecs) of idleness after which to send an automatic ping
 		}
 
+		/++
+			Returns one of [CONNECTING], [OPEN], [CLOSING], or [CLOSED].
+		+/
+		int readyState() {
+			return readyState_;
+		}
+
+		/++
+			Closes the connection, sending a graceful teardown message to the other side.
+		+/
+		/// Group: foundational
+		void close(int code = 0, string reason = null)
+			//in (reason.length < 123)
+			in { assert(reason.length < 123); } do
+		{
+			if(readyState_ != OPEN)
+				return; // it cool, we done
+			WebSocketFrame wss;
+			wss.fin = true;
+			wss.opcode = WebSocketOpcode.close;
+			wss.data = cast(ubyte[]) reason;
+			wss.send(&llsend);
+
+			readyState_ = CLOSING;
+
+			llclose();
+		}
+
+		/++
+			Sends a ping message to the server. This is done automatically by the library if you set a non-zero [Config.pingFrequency], but you can also send extra pings explicitly as well with this function.
+		+/
+		/// Group: foundational
 		void ping() {
-			auto msg = WebSocketMessage.simpleMessage(WebSocketOpcode.ping, null);
-			msg.send(cgi);
+			WebSocketFrame wss;
+			wss.fin = true;
+			wss.opcode = WebSocketOpcode.ping;
+			wss.send(&llsend);
 		}
 
+		// automatically handled....
 		void pong() {
-			auto msg = WebSocketMessage.simpleMessage(WebSocketOpcode.pong, null);
-			msg.send(cgi);
+			WebSocketFrame wss;
+			wss.fin = true;
+			wss.opcode = WebSocketOpcode.pong;
+			wss.send(&llsend);
 		}
+
+		/++
+			Sends a text message through the websocket.
+		+/
+		/// Group: foundational
+		void send(in char[] textData) {
+			WebSocketFrame wss;
+			wss.fin = true;
+			wss.opcode = WebSocketOpcode.text;
+			wss.data = cast(ubyte[]) textData;
+			wss.send(&llsend);
+		}
+
+		/++
+			Sends a binary message through the websocket.
+		+/
+		/// Group: foundational
+		void send(in ubyte[] binaryData) {
+			WebSocketFrame wss;
+			wss.fin = true;
+			wss.opcode = WebSocketOpcode.binary;
+			wss.data = cast(ubyte[]) binaryData;
+			wss.send(&llsend);
+		}
+
+		/++
+			Waits for and returns the next complete message on the socket.
+
+			Note that the onmessage function is still called, right before
+			this returns.
+		+/
+		/// Group: blocking_api
+		public WebSocketFrame waitForNextMessage() {
+			do {
+				auto m = processOnce();
+				if(m.populated)
+					return m;
+			} while(lowLevelReceive());
+
+			return WebSocketFrame.init; // FIXME? maybe.
+		}
+
+		/++
+			Tells if [waitForNextMessage] would block.
+		+/
+		/// Group: blocking_api
+		public bool waitForNextMessageWouldBlock() {
+			checkAgain:
+			if(isMessageBuffered())
+				return false;
+			if(!isDataPending())
+				return true;
+			while(isDataPending())
+				lowLevelReceive();
+			goto checkAgain;
+		}
+
+		/++
+			Is there a message in the buffer already?
+			If `true`, [waitForNextMessage] is guaranteed to return immediately.
+			If `false`, check [isDataPending] as the next step.
+		+/
+		/// Group: blocking_api
+		public bool isMessageBuffered() {
+			ubyte[] d = receiveBuffer[0 .. receiveBufferUsedLength];
+			auto s = d;
+			if(d.length) {
+				auto orig = d;
+				auto m = WebSocketFrame.read(d);
+				// that's how it indicates that it needs more data
+				if(d !is orig)
+					return true;
+			}
+
+			return false;
+		}
+
+		private ubyte continuingType;
+		private ubyte[] continuingData;
+		//private size_t continuingDataLength;
+
+		private WebSocketFrame processOnce() {
+			ubyte[] d = receiveBuffer[0 .. receiveBufferUsedLength];
+			auto s = d;
+			// FIXME: handle continuation frames more efficiently. it should really just reuse the receive buffer.
+			WebSocketFrame m;
+			if(d.length) {
+				auto orig = d;
+				m = WebSocketFrame.read(d);
+				// that's how it indicates that it needs more data
+				if(d is orig)
+					return WebSocketFrame.init;
+				m.unmaskInPlace();
+				switch(m.opcode) {
+					case WebSocketOpcode.continuation:
+						if(continuingData.length + m.data.length > config.maximumMessageSize)
+							throw new Exception("message size exceeded");
+
+						continuingData ~= m.data;
+						if(m.fin) {
+							if(ontextmessage)
+								ontextmessage(cast(char[]) continuingData);
+							if(onbinarymessage)
+								onbinarymessage(continuingData);
+
+							continuingData = null;
+						}
+					break;
+					case WebSocketOpcode.text:
+						if(m.fin) {
+							if(ontextmessage)
+								ontextmessage(m.textData);
+						} else {
+							continuingType = m.opcode;
+							//continuingDataLength = 0;
+							continuingData = null;
+							continuingData ~= m.data;
+						}
+					break;
+					case WebSocketOpcode.binary:
+						if(m.fin) {
+							if(onbinarymessage)
+								onbinarymessage(m.data);
+						} else {
+							continuingType = m.opcode;
+							//continuingDataLength = 0;
+							continuingData = null;
+							continuingData ~= m.data;
+						}
+					break;
+					case WebSocketOpcode.close:
+						readyState_ = CLOSED;
+						if(onclose)
+							onclose();
+
+						unregisterActiveSocket(this);
+					break;
+					case WebSocketOpcode.ping:
+						pong();
+					break;
+					case WebSocketOpcode.pong:
+						// just really references it is still alive, nbd.
+					break;
+					default: // ignore though i could and perhaps should throw too
+				}
+			}
+			receiveBufferUsedLength -= s.length - d.length;
+
+			return m;
+		}
+
+		private void autoprocess() {
+			// FIXME
+			do {
+				processOnce();
+			} while(lowLevelReceive());
+		}
+
+
+		void delegate() onclose; ///
+		void delegate() onerror; ///
+		void delegate(in char[]) ontextmessage; ///
+		void delegate(in ubyte[]) onbinarymessage; ///
+		void delegate() onopen; ///
+
+		/++
+
+		+/
+		/// Group: browser_api
+		void onmessage(void delegate(in char[]) dg) {
+			ontextmessage = dg;
+		}
+
+		/// ditto
+		void onmessage(void delegate(in ubyte[]) dg) {
+			onbinarymessage = dg;
+		}
+
+		/* } end copy/paste */
+
+
 	}
 
 	bool websocketRequested(Cgi cgi) {
@@ -4564,7 +5016,7 @@ version(cgi_with_websocket) {
 	WebSocket acceptWebsocket(Cgi cgi) {
 		assert(!cgi.closed);
 		assert(!cgi.outputtedResponseData);
-		cgi.setResponseStatus("101 Web Socket Protocol Handshake");
+		cgi.setResponseStatus("101 Switching Protocols");
 		cgi.header("Upgrade: WebSocket");
 		cgi.header("Connection: upgrade");
 
@@ -4585,10 +5037,11 @@ version(cgi_with_websocket) {
 		return new WebSocket(cgi);
 	}
 
-	// FIXME: implement websocket extension frames
-	// get websocket to work on other modes, not just embedded_httpd
+	// FIXME get websocket to work on other modes, not just embedded_httpd
 
+	/* copy/paste in http2.d { */
 	enum WebSocketOpcode : ubyte {
+		continuation = 0,
 		text = 1,
 		binary = 2,
 		// 3, 4, 5, 6, 7 RESERVED
@@ -4598,7 +5051,8 @@ version(cgi_with_websocket) {
 		// 11,12,13,14,15 RESERVED
 	}
 
-	struct WebSocketMessage {
+	public struct WebSocketFrame {
+		private bool populated;
 		bool fin;
 		bool rsv1;
 		bool rsv2;
@@ -4610,8 +5064,8 @@ version(cgi_with_websocket) {
 		ubyte[4] maskingKey; // don't set this when sending
 		ubyte[] data;
 
-		static WebSocketMessage simpleMessage(WebSocketOpcode opcode, void[] data) {
-			WebSocketMessage msg;
+		static WebSocketFrame simpleMessage(WebSocketOpcode opcode, void[] data) {
+			WebSocketFrame msg;
 			msg.fin = true;
 			msg.opcode = opcode;
 			msg.data = cast(ubyte[]) data;
@@ -4619,7 +5073,7 @@ version(cgi_with_websocket) {
 			return msg;
 		}
 
-		private void send(Cgi cgi) {
+		private void send(scope void delegate(ubyte[]) llsend) {
 			ubyte[64] headerScratch;
 			int headerScratchPos = 0;
 
@@ -4656,7 +5110,7 @@ version(cgi_with_websocket) {
 					}
 
 					headerScratchPos += 8;
-				} else if(realLength > 127) {
+				} else if(realLength > 125) {
 					// use 16 bit length
 					b2 |= 0x7e;
 
@@ -4675,7 +5129,7 @@ version(cgi_with_websocket) {
 				headerScratch[1] = b2;
 			}
 
-			assert(!masked, "masking key not properly implemented");
+			//assert(!masked, "masking key not properly implemented");
 			if(masked) {
 				// FIXME: randomize this
 				headerScratch[headerScratchPos .. headerScratchPos + 4] = maskingKey[];
@@ -4693,16 +5147,26 @@ version(cgi_with_websocket) {
 			}
 
 			//writeln("SENDING ", headerScratch[0 .. headerScratchPos], data);
-			cgi.write(headerScratch[0 .. headerScratchPos]);
-			cgi.write(data);
-			cgi.flush();
+			llsend(headerScratch[0 .. headerScratchPos]);
+			llsend(data);
 		}
 
-		static WebSocketMessage read(ubyte[] d) {
-			WebSocketMessage msg;
-			assert(d.length >= 2);
+		static WebSocketFrame read(ref ubyte[] d) {
+			WebSocketFrame msg;
+
+			auto orig = d;
+
+			WebSocketFrame needsMoreData() {
+				d = orig;
+				return WebSocketFrame.init;
+			}
+
+			if(d.length < 2)
+				return needsMoreData();
 
 			ubyte b = d[0];
+
+			msg.populated = true;
 
 			msg.opcode = cast(WebSocketOpcode) (b & 0x0f);
 			b >>= 4;
@@ -4724,6 +5188,8 @@ version(cgi_with_websocket) {
 				// 16 bit length
 				msg.realLength = 0;
 
+				if(d.length < 2) return needsMoreData();
+
 				foreach(i; 0 .. 2) {
 					msg.realLength |= d[0] << ((1-i) * 8);
 					d = d[1 .. $];
@@ -4731,6 +5197,8 @@ version(cgi_with_websocket) {
 			} else if(msg.lengthIndicator == 0x7f) {
 				// 64 bit length
 				msg.realLength = 0;
+
+				if(d.length < 8) return needsMoreData();
 
 				foreach(i; 0 .. 8) {
 					msg.realLength |= d[0] << ((7-i) * 8);
@@ -4742,32 +5210,41 @@ version(cgi_with_websocket) {
 			}
 
 			if(msg.masked) {
+
+				if(d.length < 4) return needsMoreData();
+
 				msg.maskingKey = d[0 .. 4];
 				d = d[4 .. $];
 			}
 
-			msg.data = d[0 .. $];
+			if(msg.realLength > d.length) {
+				return needsMoreData();
+			}
 
-			if(msg.masked) {
-				// let's just unmask it now
+			msg.data = d[0 .. cast(size_t) msg.realLength];
+			d = d[cast(size_t) msg.realLength .. $];
+
+			return msg;
+		}
+
+		void unmaskInPlace() {
+			if(this.masked) {
 				int keyIdx = 0;
-				foreach(i; 0 .. msg.data.length) {
-					msg.data[i] = msg.data[i] ^ msg.maskingKey[keyIdx];
+				foreach(i; 0 .. this.data.length) {
+					this.data[i] = this.data[i] ^ this.maskingKey[keyIdx];
 					if(keyIdx == 3)
 						keyIdx = 0;
 					else
 						keyIdx++;
 				}
 			}
-
-			return msg;
 		}
 
 		char[] textData() {
 			return cast(char[]) data;
 		}
 	}
-
+	/* } */
 }
 
 
@@ -4785,8 +5262,12 @@ version(Windows)
     else static assert(0);
 }
 
-version(Posix)
-private extern(C) int posix_spawn(pid_t*, const char*, void*, void*, const char**, const char**);
+version(Posix) {
+	version(CRuntime_Musl) {} else {
+		import core.sys.posix.unistd;
+		private extern(C) int posix_spawn(pid_t*, const char*, void*, void*, const char**, const char**);
+	}
+}
 
 
 // FIXME: these aren't quite public yet.
@@ -4899,6 +5380,7 @@ version(Posix) {
 	alias SocketConnectionHandle = SOCKET;
 }
 
+version(with_addon_servers_connections)
 LocalServerConnectionHandle openLocalServerConnection(string name) {
 	version(Posix) {
 		import core.sys.posix.unistd;
@@ -4934,6 +5416,7 @@ LocalServerConnectionHandle openLocalServerConnection(string name) {
 	}
 }
 
+version(with_addon_servers_connections)
 void closeLocalServerConnection(LocalServerConnectionHandle handle) {
 	version(Posix) {
 		import core.sys.posix.unistd;
@@ -4984,11 +5467,11 @@ struct IoOp {
 	private int bufferLengthUsed;
 	private ubyte[1] internalBuffer; // it can be overallocated!
 
-	ubyte[] allocatedBuffer() {
+	ubyte[] allocatedBuffer() return {
 		return internalBuffer.ptr[0 .. bufferLengthAllocated];
 	}
 
-	ubyte[] usedBuffer() {
+	ubyte[] usedBuffer() return {
 		return allocatedBuffer[0 .. bufferLengthUsed];
 	}
 
@@ -5034,6 +5517,7 @@ void freeIoOp(ref IoOp* ptr) {
 }
 
 version(Posix)
+version(with_addon_servers_connections)
 void nonBlockingWrite(EventIoServer eis, int connection, const void[] data) {
 	import core.sys.posix.unistd;
 
@@ -5047,6 +5531,7 @@ void nonBlockingWrite(EventIoServer eis, int connection, const void[] data) {
 	}
 }
 version(Windows)
+version(with_addon_servers_connections)
 void nonBlockingWrite(EventIoServer eis, int connection, const void[] data) {
 	// FIXME
 }
@@ -5076,6 +5561,7 @@ https://docs.microsoft.com/en-us/windows/desktop/api/winsock2/nf-winsock2-wsaget
 	
 	$(TIP If you make your subclass a `final class`, there is a slight performance improvement.)
 +/
+version(with_addon_servers_connections)
 interface EventIoServer {
 	bool handleLocalConnectionData(IoOp* op, int receivedFd);
 	void handleLocalConnectionClose(IoOp* op);
@@ -5220,6 +5706,14 @@ unittest {
 	FIXME: overloads aren't supported
 */
 
+/// Base for storing sessions in an array. Exists primarily for internal purposes and you should generally not use this.
+interface SessionObject {}
+
+private immutable void delegate(string[])[string] scheduledJobHandlers;
+
+version(with_breaking_cgi_features)
+mixin(q{
+
 mixin template ImplementRpcClientInterface(T, string serverPath) {
 	static import std.traits;
 
@@ -5309,7 +5803,7 @@ void dispatchRpcServer(Interface, Class)(Class this_, ubyte[] data, int fd) if(i
 	import std.traits;
 
 	sw: switch(calledIdx) {
-		static foreach(idx, memberName; __traits(derivedMembers, Interface))
+		foreach(idx, memberName; __traits(derivedMembers, Interface))
 		static if(__traits(isVirtualFunction, __traits(getMember, Interface, memberName))) {
 			case idx:
 				assert(calledFunction == __traits(getMember, Interface, memberName).mangleof);
@@ -5350,7 +5844,7 @@ private struct SerializationBuffer {
 		bufferLocation += data.length;
 	}
 
-	ubyte[] sendable() {
+	ubyte[] sendable() return {
 		return bufferBacking[0 .. bufferLocation];
 	}
 }
@@ -5373,9 +5867,6 @@ private struct SerializationBuffer {
 
 			will have to have dump and restore too, so i can restart without losing stuff.
 */
-
-/// Base for storing sessions in an array. Exists primarily for internal purposes and you should generally not use this.
-interface SessionObject {}
 
 /++
 	A convenience object for talking to the [BasicDataServer] from a higher level.
@@ -5581,6 +6072,7 @@ class MockSession(Data) : Session!Data {
 	Direct interface to the basic data add-on server. You can
 	typically use [Cgi.getSessionObject] as a more convenient interface.
 +/
+version(with_addon_servers_connections)
 interface BasicDataServer {
 	///
 	void createSession(string sessionId, int lifetime);
@@ -5602,10 +6094,12 @@ interface BasicDataServer {
 	}
 }
 
+version(with_addon_servers_connections)
 class BasicDataServerConnection : BasicDataServer {
 	mixin ImplementRpcClientInterface!(BasicDataServer, "/tmp/arsd_session_server");
 }
 
+version(with_addon_servers)
 final class BasicDataServerImplementation : BasicDataServer, EventIoServer {
 
 	void createSession(string sessionId, int lifetime) {
@@ -5671,6 +6165,7 @@ final class BasicDataServerImplementation : BasicDataServer, EventIoServer {
 		schedule!fn(args).asap(); // run it in the background as soon as the event loop gets around to it
 	---
 +/
+version(with_addon_servers_connections)
 struct ScheduledJobHelper {
 	private string func;
 	private string[] args;
@@ -5731,8 +6226,6 @@ struct ScheduledJobHelper {
 	+/
 }
 
-private immutable void delegate(string[])[string] scheduledJobHandlers;
-
 /++
 	First step to schedule a job on the scheduled job server.
 
@@ -5775,11 +6268,14 @@ interface ScheduledJobServer {
 	void cancelJob(int jobId);
 }
 
+version(with_addon_servers_connections)
 class ScheduledJobServerConnection : ScheduledJobServer {
 	mixin ImplementRpcClientInterface!(ScheduledJobServer, "/tmp/arsd_scheduled_job_server");
 }
 
+version(with_addon_servers)
 final class ScheduledJobServerImplementation : ScheduledJobServer, EventIoServer {
+	// FIXME: we need to handle SIGCHLD in this somehow
 	// whenIs is 0 for relative, 1 for absolute
 	protected int scheduleJob(int whenIs, int when, string executable, string func, string[] args) {
 		auto nj = nextJobId;
@@ -5824,8 +6320,8 @@ final class ScheduledJobServerImplementation : ScheduledJobServer, EventIoServer
 				throw new Exception("epoll_ctl " ~ to!string(errno));
 
 			jobs[nj] = job;
+			return nj;
 		} else assert(0);
-		return nj;
 	}
 
 	protected void cancelJob(int jobId) {
@@ -5875,6 +6371,7 @@ final class ScheduledJobServerImplementation : ScheduledJobServer, EventIoServer
 }
 
 ///
+version(with_addon_servers_connections)
 interface EventSourceServer {
 	/++
 		sends this cgi request to the event server so it will be fed events. You should not do anything else with the cgi object after this.
@@ -5979,6 +6476,7 @@ interface EventSourceServer {
 }
 
 ///
+version(with_addon_servers)
 final class EventSourceServerImplementation : EventSourceServer, EventIoServer {
 
 	protected:
@@ -6068,14 +6566,14 @@ final class EventSourceServerImplementation : EventSourceServer, EventIoServer {
 		int lastEventIdLength;
 		char[32] lastEventIdBuffer = 0;
 
-		char[] url() {
+		char[] url() return {
 			return urlBuffer[0 .. urlLength];
 		}
 		void url(in char[] u) {
 			urlBuffer[0 .. u.length] = u[];
 			urlLength = cast(int) u.length;
 		}
-		char[] lastEventId() {
+		char[] lastEventId() return {
 			return lastEventIdBuffer[0 .. lastEventIdLength];
 		}
 		void populate(bool responseChunked, in char[] url, in char[] lastEventId)
@@ -6103,13 +6601,13 @@ final class EventSourceServerImplementation : EventSourceServer, EventIoServer {
 		char[2048] messageBuffer = 0;
 		int _lifetime;
 
-		char[] message() {
+		char[] message() return {
 			return messageBuffer[0 .. messageLength];
 		}
-		char[] type() {
+		char[] type() return {
 			return typeBuffer[0 .. typeLength];
 		}
-		char[] url() {
+		char[] url() return {
 			return urlBuffer[0 .. urlLength];
 		}
 		void url(in char[] u) {
@@ -6270,6 +6768,7 @@ void runAddonServer(EIS)(string localListenerName, EIS eis) if(is(EIS : EventIoS
 			import core.sys.posix.poll;
 		}
 
+		version(linux)
 		eis.epoll_fd = epoll_fd;
 
 		auto acceptOp = allocateIoOp(sock, IoOp.Read, 0, null);
@@ -6457,7 +6956,7 @@ void runAddonServer(EIS)(string localListenerName, EIS eis) if(is(EIS : EventIoS
 }
 
 
-version(Posix)
+version(with_sendfd)
 // copied from the web and ported from C
 // see https://stackoverflow.com/questions/2358684/can-i-share-a-file-descriptor-to-another-process-on-linux-or-are-they-local-to-t
 ssize_t write_fd(int fd, void *ptr, size_t nbytes, int sendfd) {
@@ -6497,7 +6996,7 @@ ssize_t write_fd(int fd, void *ptr, size_t nbytes, int sendfd) {
 	return sendmsg(fd, &msg, 0);
 }
 
-version(Posix)
+version(with_sendfd)
 // copied from the web and ported from C
 ssize_t read_fd(int fd, void *ptr, size_t nbytes, int *recvfd) {
 	msghdr msg;
@@ -6706,7 +7205,7 @@ auto callFromCgi(alias method, T)(T dg, Cgi cgi) {
 	// first, check for missing arguments and initialize to defaults if necessary
 
 	static if(is(typeof(method) P == __parameters))
-	static foreach(idx, param; P) {{
+	foreach(idx, param; P) {{
 		// see: mustNotBeSetFromWebParams
 		static if(is(param : Cgi)) {
 			static assert(!is(param == immutable));
@@ -6716,7 +7215,7 @@ auto callFromCgi(alias method, T)(T dg, Cgi cgi) {
 			cast() params[idx] = cgi.getSessionObject!D();
 		} else {
 			bool populated;
-			static foreach(uda; __traits(getAttributes, P[idx .. idx + 1])) {
+			foreach(uda; __traits(getAttributes, P[idx .. idx + 1])) {
 				static if(is(uda == ifCalledFromWeb!func, alias func)) {
 					static if(is(typeof(func(cgi))))
 						params[idx] = func(cgi);
@@ -6782,7 +7281,7 @@ auto callFromCgi(alias method, T)(T dg, Cgi cgi) {
 
 					// set the child member
 					switch(paramName) {
-						static foreach(idx, memberName; __traits(allMembers, T))
+						foreach(idx, memberName; __traits(allMembers, T))
 						static if(__traits(compiles, __traits(getMember, T, memberName).offsetof)) {
 							// data member!
 							case memberName:
@@ -6793,6 +7292,8 @@ auto callFromCgi(alias method, T)(T dg, Cgi cgi) {
 					}
 				}
 			}
+
+			return false;
 		} else static if(isSomeString!T || isIntegral!T || isFloatingPoint!T) {
 			*what = to!T(value);
 			return true;
@@ -6853,11 +7354,13 @@ auto callFromCgi(alias method, T)(T dg, Cgi cgi) {
 					return true;
 				}
 			}
+
+			return false;
 		} else {
 			static assert(0, "unsupported type for cgi call " ~ T.stringof);
 		}
 
-		return false;
+		//return false;
 	}
 
 	void setArgument(string name, string value) {
@@ -6872,7 +7375,7 @@ auto callFromCgi(alias method, T)(T dg, Cgi cgi) {
 
 		sw: switch(paramName) {
 			static if(is(typeof(method) P == __parameters))
-			static foreach(idx, param; P) {
+			foreach(idx, param; P) {
 				static if(mustNotBeSetFromWebParams!(P[idx], __traits(getAttributes, P[idx .. idx + 1]))) {
 					// cannot be set from the outside
 				} else {
@@ -6923,7 +7426,7 @@ private bool mustNotBeSetFromWebParams(T, attrs...)() {
 	} else static if(__traits(compiles, T.getAutomaticallyForCgi(Cgi.init))) {
 		return true;
 	} else {
-		static foreach(uda; attrs)
+		foreach(uda; attrs)
 			static if(is(uda == ifCalledFromWeb!func, alias func))
 				return true;
 		return false;
@@ -6931,7 +7434,7 @@ private bool mustNotBeSetFromWebParams(T, attrs...)() {
 }
 
 private bool hasIfCalledFromWeb(attrs...)() {
-	static foreach(uda; attrs)
+	foreach(uda; attrs)
 		static if(is(uda == ifCalledFromWeb!func, alias func))
 			return true;
 	return false;
@@ -7171,7 +7674,7 @@ html", true, true);
 	/// Multiple responses deconstruct the algebraic type and forward to the appropriate handler at runtime
 	void presentSuccessfulReturnAsHtml(T : MultipleResponses!Types, Types...)(Cgi cgi, T ret) {
 		bool outputted = false;
-		static foreach(index, type; Types) {
+		foreach(index, type; Types) {
 			if(ret.contains == index) {
 				assert(!outputted);
 				outputted = true;
@@ -7286,7 +7789,7 @@ html", true, true);
 			auto fieldset = div.addChild("fieldset");
 			fieldset.addChild("legend", beautify(T.stringof)); // FIXME
 			fieldset.addChild("input", name);
-			static foreach(idx, memberName; __traits(allMembers, T))
+			foreach(idx, memberName; __traits(allMembers, T))
 			static if(__traits(compiles, __traits(getMember, T, memberName).offsetof)) {
 				fieldset.appendChild(elementFor!(typeof(__traits(getMember, T, memberName)))(beautify(memberName), name ~ "." ~ memberName));
 			}
@@ -7370,13 +7873,13 @@ html", true, true);
 		//alias defaults = ParameterDefaults!method;
 
 		static if(is(typeof(method) P == __parameters))
-		static foreach(idx, _; P) {{
+		foreach(idx, _; P) {{
 
 			alias param = P[idx .. idx + 1];
 
 			static if(!mustNotBeSetFromWebParams!(param[0], __traits(getAttributes, param))) {
 				string displayName = beautify(__traits(identifier, param));
-				static foreach(attr; __traits(getAttributes, param))
+				foreach(attr; __traits(getAttributes, param))
 					static if(is(typeof(attr) == DisplayName))
 						displayName = attr.name;
 				auto i = form.appendChild(elementFor!(param)(displayName, __traits(identifier, param)));
@@ -7404,10 +7907,10 @@ html", true, true);
 		//alias idents = ParameterIdentifierTuple!method;
 		//alias defaults = ParameterDefaults!method;
 
-		static foreach(idx, memberName; __traits(derivedMembers, T)) {{
+		foreach(idx, memberName; __traits(derivedMembers, T)) {{
 		static if(__traits(compiles, __traits(getMember, obj, memberName).offsetof)) {
 			string displayName = beautify(memberName);
-			static foreach(attr; __traits(getAttributes,  __traits(getMember, T, memberName)))
+			foreach(attr; __traits(getAttributes,  __traits(getMember, T, memberName)))
 				static if(is(typeof(attr) == DisplayName))
 					displayName = attr.name;
 			form.appendChild(elementFor!(typeof(__traits(getMember, T, memberName)))(displayName, memberName));
@@ -7429,7 +7932,7 @@ html", true, true);
 		} else static if(is(T : Element)) {
 			return t;
 		} else static if(is(T == MultipleResponses!Types, Types...)) {
-			static foreach(index, type; Types) {
+			foreach(index, type; Types) {
 				if(t.contains == index)
 					return formatReturnValueAsHtml(t.payload[index]);
 			}
@@ -7448,7 +7951,7 @@ html", true, true);
 			auto dl = Element.make("dl");
 			dl.addClass("automatic-data-display");
 
-			static foreach(idx, memberName; __traits(allMembers, T))
+			foreach(idx, memberName; __traits(allMembers, T))
 			static if(__traits(compiles, __traits(getMember, T, memberName).offsetof)) {
 				dl.addChild("dt", memberName);
 				dl.addChild("dt", formatReturnValueAsHtml(__traits(getMember, t, memberName)));
@@ -7463,7 +7966,7 @@ html", true, true);
 				auto table = cast(Table) Element.make("table");
 				table.addClass("automatic-data-display");
 				string[] names;
-				static foreach(idx, memberName; __traits(derivedMembers, E))
+				foreach(idx, memberName; __traits(derivedMembers, E))
 				static if(__traits(compiles, __traits(getMember, E, memberName).offsetof)) {
 					names ~= beautify(memberName);
 				}
@@ -7471,7 +7974,7 @@ html", true, true);
 
 				foreach(l; t) {
 					auto tr = table.appendRow();
-					static foreach(idx, memberName; __traits(derivedMembers, E))
+					foreach(idx, memberName; __traits(derivedMembers, E))
 					static if(__traits(compiles, __traits(getMember, E, memberName).offsetof)) {
 						static if(memberName == "id") {
 							string val = to!string(__traits(getMember, l, memberName));
@@ -7489,7 +7992,7 @@ html", true, true);
 				auto table = cast(Table) Element.make("table");
 				table.addClass("automatic-data-display");
 				string[] names;
-				static foreach(idx, memberName; __traits(allMembers, E))
+				foreach(idx, memberName; __traits(allMembers, E))
 				static if(__traits(compiles, __traits(getMember, E, memberName).offsetof)) {
 					names ~= beautify(memberName);
 				}
@@ -7497,7 +8000,7 @@ html", true, true);
 
 				foreach(l; t) {
 					auto tr = table.appendRow();
-					static foreach(idx, memberName; __traits(allMembers, E))
+					foreach(idx, memberName; __traits(allMembers, E))
 					static if(__traits(compiles, __traits(getMember, E, memberName).offsetof)) {
 						tr.addChild("td", formatReturnValueAsHtml(__traits(getMember, l, memberName)));
 					}
@@ -7586,7 +8089,7 @@ struct MultipleResponses(T...) {
 					alias findHandler = findHandler!(type, HandlersToCheck[1 .. $]);
 			}
 		}
-		static foreach(index, type; T) {{
+		foreach(index, type; T) {
 			alias handler = findHandler!(type, Handlers);
 			static if(is(handler == void))
 				static assert(0, "Type " ~ type.stringof ~ " was not handled by visitor");
@@ -7594,7 +8097,7 @@ struct MultipleResponses(T...) {
 				if(index == contains)
 					handler(payload[index]);
 			}
-		}}
+		}
 	}
 
 	/+
@@ -7694,7 +8197,7 @@ private auto serveApiInternal(T)(string urlPrefix) {
 			static if(is(typeof(T.__ctor) P == __parameters)) {
 				P params;
 
-				static foreach(pidx, param; P) {
+				foreach(pidx, param; P) {
 					static if(is(param : Cgi)) {
 						static assert(!is(param == immutable));
 						cast() params[pidx] = cgi;
@@ -7704,7 +8207,7 @@ private auto serveApiInternal(T)(string urlPrefix) {
 
 					} else {
 						static if(hasIfCalledFromWeb!(__traits(getAttributes, P[pidx .. pidx + 1]))) {
-							static foreach(uda; __traits(getAttributes, P[pidx .. pidx + 1])) {
+							foreach(uda; __traits(getAttributes, P[pidx .. pidx + 1])) {
 								static if(is(uda == ifCalledFromWeb!func, alias func)) {
 									static if(is(typeof(func(cgi))))
 										params[pidx] = func(cgi);
@@ -7746,9 +8249,9 @@ private auto serveApiInternal(T)(string urlPrefix) {
 				return true;
 				default:
 					throw t;
-				return true;
+				// return true;
 			}
-			return true;
+			// return true;
 		}
 
 		assert(0);
@@ -7784,9 +8287,9 @@ private auto serveApiInternal(T)(string urlPrefix) {
 			hack ~= "/";
 
 		switch(hack) {
-			static foreach(methodName; __traits(derivedMembers, T))
+			foreach(methodName; __traits(derivedMembers, T))
 			static if(methodName != "__ctor")
-			static foreach(idx, overload; __traits(getOverloads, T, methodName)) {{
+			foreach(idx, overload; __traits(getOverloads, T, methodName)) {
 			static if(is(typeof(overload) P == __parameters))
 			static if(is(typeof(overload) R == return))
 			static if(__traits(getProtection, overload) == "public" || __traits(getProtection, overload) == "export")
@@ -7804,7 +8307,9 @@ private auto serveApiInternal(T)(string urlPrefix) {
 
 					P params;
 
-					static foreach(pidx, param; P) {
+					string ident;
+
+					foreach(pidx, param; P) {
 						static if(is(param : Cgi)) {
 							static assert(!is(param == immutable));
 							cast() params[pidx] = cgi;
@@ -7813,7 +8318,7 @@ private auto serveApiInternal(T)(string urlPrefix) {
 							cast() params[pidx] = cgi.getSessionObject!D();
 						} else {
 							static if(hasIfCalledFromWeb!(__traits(getAttributes, P[pidx .. pidx + 1]))) {
-								static foreach(uda; __traits(getAttributes, P[pidx .. pidx + 1])) {
+								foreach(uda; __traits(getAttributes, P[pidx .. pidx + 1])) {
 									static if(is(uda == ifCalledFromWeb!func, alias func)) {
 										static if(is(typeof(func(cgi))))
 											params[pidx] = func(cgi);
@@ -7826,7 +8331,7 @@ private auto serveApiInternal(T)(string urlPrefix) {
 								static if(__traits(compiles, { params[pidx] = param.getAutomaticallyForCgi(cgi); } )) {
 									params[pidx] = param.getAutomaticallyForCgi(cgi);
 								} else static if(is(param == string)) {
-									auto ident = nextPieceFromSlash(remainingUrl);
+									ident = nextPieceFromSlash(remainingUrl);
 									if(ident is null) {
 										// trailing slash mandated on subresources
 										cgi.setResponseLocation(cgi.pathInfo ~ "/");
@@ -7941,7 +8446,7 @@ private auto serveApiInternal(T)(string urlPrefix) {
 							auto ret = callFromCgi!(__traits(getOverloads, obj, methodName)[idx])(&(__traits(getOverloads, obj, methodName)[idx]), cgi);
 							static if(is(typeof(ret) == MultipleResponses!Types, Types...)) {
 								var json;
-								static foreach(index, type; Types) {
+								foreach(index, type; Types) {
 									if(ret.contains == index)
 										json = ret.payload[index];
 								}
@@ -7968,7 +8473,7 @@ private auto serveApiInternal(T)(string urlPrefix) {
 				//return true;
 				}
 			}
-			}}
+			}
 			case "script.js":
 				cgi.setResponseContentType("text/javascript");
 				cgi.gzipResponse = true;
@@ -7989,9 +8494,11 @@ private auto serveApiInternal(T)(string urlPrefix) {
 }
 
 string defaultFormat(alias method)() {
-	static foreach(attr; __traits(getAttributes, method)) {
+	bool nonConstConditionForWorkingAroundASpuriousDmdWarning = true;
+	foreach(attr; __traits(getAttributes, method)) {
 		static if(is(typeof(attr) == DefaultFormat)) {
-			return attr.value;
+			if(nonConstConditionForWorkingAroundASpuriousDmdWarning)
+				return attr.value;
 		}
 	}
 	return "html";
@@ -8001,7 +8508,7 @@ string[] urlNamesForMethod(alias method)(string def) {
 	auto verb = Cgi.RequestMethod.GET;
 	bool foundVerb = false;
 	bool foundNoun = false;
-	static foreach(attr; __traits(getAttributes, method)) {
+	foreach(attr; __traits(getAttributes, method)) {
 		static if(is(typeof(attr) == Cgi.RequestMethod)) {
 			verb = attr;
 			if(foundVerb)
@@ -8380,7 +8887,7 @@ bool restObjectServeHandler(T, Presenter)(Cgi cgi, Presenter presenter, string u
 		div.addClass("Dclass_" ~ T.stringof);
 		div.dataset.url = urlId;
 		bool first = true;
-		static foreach(idx, memberName; __traits(derivedMembers, T))
+		foreach(idx, memberName; __traits(derivedMembers, T))
 		static if(__traits(compiles, __traits(getMember, obj, memberName).offsetof)) {
 			if(!first) div.addChild("br"); else first = false;
 			div.appendChild(presenter.formatReturnValueAsHtml(__traits(getMember, obj, memberName)));
@@ -8390,7 +8897,7 @@ bool restObjectServeHandler(T, Presenter)(Cgi cgi, Presenter presenter, string u
 	obj.toJsonFromReflection = delegate(t) {
 		import arsd.jsvar;
 		var v = var.emptyObject();
-		static foreach(idx, memberName; __traits(derivedMembers, T))
+		foreach(idx, memberName; __traits(derivedMembers, T))
 		static if(__traits(compiles, __traits(getMember, obj, memberName).offsetof)) {
 			v[memberName] = __traits(getMember, obj, memberName);
 		}
@@ -8424,7 +8931,7 @@ bool restObjectServeHandler(T, Presenter)(Cgi cgi, Presenter presenter, string u
 
 
 	static void applyChangesTemplate(Obj)(Cgi cgi, Obj obj) {
-		static foreach(idx, memberName; __traits(derivedMembers, Obj))
+		foreach(idx, memberName; __traits(derivedMembers, Obj))
 		static if(__traits(compiles, __traits(getMember, obj, memberName).offsetof)) {
 			__traits(getMember, obj, memberName) = cgi.request(memberName, __traits(getMember, obj, memberName));
 		}
@@ -8493,7 +9000,7 @@ bool restObjectServeHandler(T, Presenter)(Cgi cgi, Presenter presenter, string u
 							var json = var.emptyArray;
 							foreach(r; results.results) {
 								var o = var.emptyObject;
-								static foreach(idx, memberName; __traits(derivedMembers, typeof(r)))
+								foreach(idx, memberName; __traits(derivedMembers, typeof(r)))
 								static if(__traits(compiles, __traits(getMember, r, memberName).offsetof)) {
 									o[memberName] = __traits(getMember, r, memberName);
 								}
@@ -8855,7 +9362,7 @@ template dispatcher(definitions...) {
 
 	bool dispatcher(DispatcherData)(DispatcherData dispatcherData) if(!is(DispatcherData : Cgi)) {
 		// I can prolly make this more efficient later but meh.
-		static foreach(definition; definitions) {
+		foreach(definition; definitions) {
 			if(definition.rejectFurther) {
 				if(dispatcherData.cgi.pathInfo[dispatcherData.pathInfoStart .. $] == definition.urlPrefix) {
 					auto ret = definition.handler(
@@ -8882,6 +9389,8 @@ template dispatcher(definitions...) {
 	}
 }
 
+});
+
 /+
 /++
 	This is the beginnings of my web.d 2.0 - it dispatches web requests to a class object.
@@ -8904,11 +9413,11 @@ bool apiDispatcher()(Cgi cgi) {
 }
 +/
 /*
-Copyright: Adam D. Ruppe, 2008 - 2019
-License:   <a href="http://www.boost.org/LICENSE_1_0.txt">Boost License 1.0</a>.
+Copyright: Adam D. Ruppe, 2008 - 2020
+License:   [http://www.boost.org/LICENSE_1_0.txt|Boost License 1.0].
 Authors: Adam D. Ruppe
 
-	Copyright Adam D. Ruppe 2008 - 2019.
+	Copyright Adam D. Ruppe 2008 - 2020.
 Distributed under the Boost Software License, Version 1.0.
    (See accompanying file LICENSE_1_0.txt or copy at
 	http://www.boost.org/LICENSE_1_0.txt)

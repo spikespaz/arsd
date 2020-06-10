@@ -3,12 +3,31 @@
 	"targetType": "library",
 	"importPaths": ["."],
 	"sourceFiles": ["package.d"],
-	"description": "A container of various subpackages that do lots of different things. You should use one of the subpackages instead of the main package in most cases, but you can try the complete package if you get duplicated dependency issues.",
+	"description": "Subpackage collection for web, database, terminal ui, gui, scripting, and more with a commitment to long-term compatibility and stability.",
+	"authors": ["Adam D. Ruppe"],
 	"license":"BSL-1.0",
 	"dependencies": {
+		":simpledisplay": "*",
+		":minigui": "*",
+		":nanovega": "*",
+		":email": "*",
+		":image_files": "*",
+		":png": "*",
+		":htmltotext": "*",
+		":dom": "*",
+		":characterencodings": "*",
 		":cgi": "*",
+		":mysql": "*",
+		":postgres": "*",
+		":sqlite": "*",
+		":mssql": "*",
 		":http": "*",
-		":terminal": "*"
+		":jsvar": "*",
+		":script": "*",
+		":terminal": "*",
+		":ttf": "*",
+		":color_base": "*",
+		":database_base": "*"
 	},
 	"subPackages": [
 		{
@@ -17,18 +36,24 @@
 			"targetType": "library",
 			"importPaths": ["."],
 			"dflags": ["-mv=arsd.simpledisplay=simpledisplay.d"],
+			"lflags-osx": ["-L/usr/X11/lib"],
 			"dependencies": {"arsd-official:color_base":"*"},
 			"configurations": [
 				{
 					"name": "normal",
 					"libs-posix": ["X11", "Xext", "GL", "GLU"],
-					"libs-windows": ["gdi32", "opengl32", "glu32"],
+					"libs-windows": ["gdi32", "opengl32", "glu32"]
 				},
 				{
 					"name": "without-opengl",
 					"versions": ["without_opengl"],
 					"libs-windows": ["gdi32"],
 					"libs-posix": ["X11", "Xext"]
+				},
+				{
+					"name": "cocoa",
+					"versions-osx": [ "OSXCocoa", "allow_unimplemented_features", "without_opengl" ],
+					"lflags-osx": ["-framework", "Cocoa"],
 				}
 			],
 			"sourceFiles": ["simpledisplay.d"]
@@ -45,35 +70,94 @@
 		{
 			"name": "nanovega",
 			"description": "Vector graphics library",
-			"targetType": "sourceLibrary",
+			"targetType": "library",
+			"dflags": ["-mv=arsd.nanovega=nanovega.d"],
 			"dependencies": {
 				"arsd-official:simpledisplay":"*",
 				"arsd-official:image_files":"*",
+				"arsd-official:svg":"*",
 				"arsd-official:ttf":"*"
 			},
+			"importPaths": ["."],
 			"libs-posix": ["freetype", "fontconfig"],
-			"sourceFiles": ["nanovega.d", "blendish.d", "svg.d"]
+			"sourceFiles": ["nanovega.d", "blendish.d"]
 		},
 		{
 			"name": "email",
 			"description": "Email helper library, both sending MIME messages and parsing incoming mbox/maildir messages",
-			"targetType": "sourceLibrary",
+			"targetType": "library",
+			"importPaths": ["."],
 			"dependencies": {"arsd-official:htmltotext":"*"},
+			"dflags": ["-mv=arsd.email=email.d"],
 			"sourceFiles": ["email.d"]
-
 		},
 		{
 			"name": "image_files",
-			"description": "Image file format support - PNG read/write, JPEG, TGA, BMP, PCX, TGA, DDS read.",
-			"targetType": "sourceLibrary",
-			"dependencies": {"arsd-official:color_base":"*"},
-			"sourceFiles": ["image.d", "png.d", "bmp.d", "jpeg.d", "targa.d", "pcx.d", "dds.d"]
+			"description": "Various image file format support - PNG read/write, JPEG, TGA, BMP, PCX, TGA, DDS read.",
+			"importPaths": ["."],
+			"targetType": "library",
+			"dependencies": {
+				"arsd-official:color_base":"*",
+				"arsd-official:png":"*",
+				"arsd-official:bmp":"*",
+				"arsd-official:jpeg":"*"
+			},
+			"dflags": [
+				"-mv=arsd.image=image.d",
+				"-mv=arsd.targa=targa.d",
+				"-mv=arsd.pcx=pcx.d",
+				"-mv=arsd.dds=dds.d"
+			],
+			"sourceFiles": ["image.d", "targa.d", "pcx.d", "dds.d"]
+		},
+		{
+			"name": "svg",
+			"description": "Dependency-free partial SVG file format read support",
+			"importPaths": ["."],
+			"targetType": "library",
+			"dflags": ["-mv=arsd.svg=svg.d"],
+			"sourceFiles": ["svg.d"]
+		},
+		{
+			"name": "jpeg",
+			"description": "Dependency-free partial JPEG file format read support",
+			"importPaths": ["."],
+			"targetType": "library",
+			"dflags": ["-mv=arsd.jpeg=jpeg.d"],
+			"dependencies": {
+				"arsd-official:color_base":"*"
+			},
+			"sourceFiles": ["jpeg.d"]
+		},
+		{
+			"name": "png",
+			"description": "PNG file format support",
+			"importPaths": ["."],
+			"targetType": "library",
+			"dflags": ["-mv=arsd.png=png.d"],
+			"dependencies": {
+				"arsd-official:color_base":"*"
+			},
+			"sourceFiles": ["png.d"]
+		},
+		{
+			"name": "bmp",
+			"description": "BMP file format support",
+			"importPaths": ["."],
+			"targetType": "library",
+			"dflags": ["-mv=arsd.bmp=bmp.d"],
+			"dependencies": {
+				"arsd-official:color_base":"*"
+			},
+			"sourceFiles": ["bmp.d"]
 		},
 		{
 			"name": "htmltotext",
 			"description": "HTML to plain text conversion",
-			"targetType": "sourceLibrary",
+			"importPaths": ["."],
+			"targetType": "library",
 			"dependencies": {"arsd-official:dom":"*", "arsd-official:color_base":"*"},
+			"dflags": ["-mv=arsd.htmltotext=htmltotext.d"],
 			"sourceFiles": ["htmltotext.d"]
 
 		},
@@ -85,6 +169,15 @@
 			"importPaths": ["."],
 			"dflags": ["-mv=arsd.dom=dom.d"],
 			"sourceFiles": ["dom.d"]
+		},
+		{
+			"name": "rss",
+			"description": "RSS/Atom parsing",
+			"targetType": "library",
+			"dependencies": {"arsd-official:dom":"*"},
+			"importPaths": ["."],
+			"dflags": ["-mv=arsd.rss=rss.d"],
+			"sourceFiles": ["rss.d"]
 		},
 		{
 			"name": "characterencodings",
@@ -169,24 +262,45 @@
 		{
 			"name": "http",
 			"description": "HTTP client library. Depends on OpenSSL right now on all platforms. On 32 bit Windows, you may need to get OMF openssl lib and dlls (ask me if you can't find it)",
-			"libs": ["crypto", "ssl"],
-			"versions": ["with_openssl"],
 			"targetType": "library",
 			"sourceFiles": ["http2.d"],
 			"importPaths": ["."],
-			"dflags": ["-mv=arsd.http2=http2.d"]
+			"dflags": ["-mv=arsd.http2=http2.d"],
+			"configurations": [
+				{
+					"name": "with_openssl",
+					"versions": ["with_openssl"],
+					"libs": ["crypto", "ssl"]
+				},
+				{
+					"name": "without_openssl",
+					"versions": ["without_openssl"]
+				}
+			]
 		},
 		{
 			"name": "jsvar",
 			"description": "Javascript-like object in D, capable of json read/write/manipulation.",
-			"targetType": "sourceLibrary",
+			"targetType": "library",
+			"importPaths": ["."],
+			"dflags": ["-mv=arsd.jsvar=jsvar.d"],
 			"sourceFiles": ["jsvar.d"]
+		},
+		{
+			"name": "jni",
+			"description": "Provides easy interop with Java via JNI.",
+			"targetType": "library",
+			"importPaths": ["."],
+			"dflags": ["-mv=arsd.jni=jni.d"],
+			"sourceFiles": ["jni.d"]
 		},
 		{
 			"name": "script",
 			"description": "Small Javascript-like script interpreter with easy D API",
-			"targetType": "sourceLibrary",
+			"targetType": "library",
 			"dependencies": {"arsd-official:jsvar":"*"},
+			"importPaths": ["."],
+			"dflags": ["-mv=arsd.script=script.d"],
 			"sourceFiles": ["script.d"]
 		},
 		{
@@ -195,12 +309,44 @@
 			"targetType": "library",
 			"sourceFiles": ["terminal.d"],
 			"importPaths": ["."],
-			"dflags": ["-mv=arsd.terminal=terminal.d"]
+			"dflags": ["-mv=arsd.terminal=terminal.d"],
+			"configurations": [
+				{
+					"name": "normal"
+				},
+				{
+					"name": "builtin_emulator",
+					"versions": ["TerminalDirectToEmulator"],
+					"dependencies": {
+						"arsd-official:terminalemulator": "*",
+						"arsd-official:minigui": "*",
+
+						"arsd-official:png":"*",
+						"arsd-official:jpeg":"*",
+						"arsd-official:svg":"*",
+						"arsd-official:bmp":"*"
+					}
+				}
+			]
+		},
+		{
+			"name": "terminalemulator",
+			"description": "A terminal emulation core as an in-memory library. Also includes mixin templates to assist with creating UIs, etc.",
+			"targetType": "library",
+			"importPaths": ["."],
+			"libs-posix": ["util"],
+			"sourceFiles": ["terminalemulator.d"],
+			"dflags": ["-mv=arsd.terminalemulator=terminalemulator.d"],
+			"dependencies": {
+				"arsd-official:color_base":"*"
+			}
 		},
 		{
 			"name": "ttf",
 			"description": "port of stb_ttf to D",
-			"targetType": "sourceLibrary",
+			"importPaths": ["."],
+			"targetType": "library",
+			"dflags": ["-mv=arsd.ttf=ttf.d"],
 			"sourceFiles": ["ttf.d"]
 		},
 		{
@@ -218,6 +364,33 @@
 			"sourceFiles": ["database.d"],
 			"importPaths": ["."],
 			"dflags": ["-mv=arsd.database=database.d"]
+		},
+		{
+			"name": "libssh2_bindings",
+			"description": "My bindings to libssh2",
+			"targetType": "library",
+			"sourceFiles": ["libssh2.d"],
+			"importPaths": ["."],
+			"libs": ["ssh2"],
+			"dflags": ["-mv=arsd.libssh2=libssh2.d"]
+		},
+		{
+			"name": "eventloop",
+			"description": "My DEPRECATED event loop. Do NOT use in new programs, only offered here because I use it in a lot of old programs.",
+			"targetType": "sourceLibrary",
+			"versions": ["with_eventloop"],
+			"sourceFiles": ["eventloop.d"],
+			"importPaths": ["."],
+			"dflags": ["-mv=arsd.eventloop=eventloop.d"]
+		},
+		{
+			"name": "archive",
+			"description": "Archive file support - tar, tar.xz decoders, and custom format \"arcz\" encoding and decoding. Self-contained.",
+			"targetType": "library",
+			"sourceFiles": ["archive.d"],
+			"importPaths": ["."],
+			"dflags": ["-mv=arsd.archive=archive.d"]
 		}
+
 	]
 }

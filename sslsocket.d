@@ -1,4 +1,9 @@
-/**
+/* *
+
+	Don't use this file anymore. The maintained version is in http2.d, just use that.
+
+	Old docs below:
+
 	This is CLIENT only at this point. Don't try to
 	bind/accept with these.
 
@@ -17,7 +22,7 @@
 module sslsocket;
 
 
-public import std.socket;
+import std.socket;
 
 // see also:
 // http://msdn.microsoft.com/en-us/library/aa380536%28v=vs.85%29.aspx
@@ -81,7 +86,7 @@ version(use_openssl) {
 			ssl = SSL_new(ctx);
 			if(!verifyPeer)
 				SSL_set_verify(ssl, SSL_VERIFY_NONE, null);
-			SSL_set_fd(ssl, this.handle);
+			SSL_set_fd(ssl, cast(int) this.handle);
 		}
 
 		bool dataPending() {

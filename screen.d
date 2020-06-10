@@ -1,5 +1,8 @@
 // This code is D 1.0
 
+/**
+	Part of my old D 1.0 game helper code that used SDL. I keep it compiling on new D compilers too, but it is not meant to be used in new projects.
+*/
 module arsd.screen;
 
 import sdl.SDL;
@@ -12,8 +15,12 @@ import std.format;
 
 import arsd.engine;
 
-static import std.c.string;
+version(D_Version2)
+static import stdcstring = core.stdc.string;
+else
+static import stdcstring = std.c.string;
 
+version(none)
 char[] fmt(...){
     char[] o;
     void putc(dchar c)
@@ -278,8 +285,8 @@ class FontEngine{
 
 	}
 
-	TTF_Font* fonts[8];
-	Image[char[]] cache[8];
+	TTF_Font*[8] fonts;
+	Image[char[]][8] cache;
 }
 
 interface Drawable{
@@ -468,7 +475,7 @@ class Image : Drawable{
 		if(t)
 			return tex;
 		else{
-			float f[4];
+			float[4] f;
 			tex = SDL_GL_LoadTexture(surface, f.ptr);
 			t = true;
 			total++;
@@ -618,7 +625,7 @@ class Screen : Drawable{
 
 		// FIXME: this crashes on Windows
 		for(int i = 0; i < yr; i++)
-			std.c.string.memcpy(temp.sur.pixels + 4 * xr * i, image.sur.pixels + 4 * xr * (yr-1 - i), 4 * xr);
+			stdcstring.memcpy(temp.sur.pixels + 4 * xr * i, image.sur.pixels + 4 * xr * (yr-1 - i), 4 * xr);
 //        memcpy(image.sur.pixels, tem.psur.pixels, xres * yres * 4);
 
 		return temp;
@@ -929,6 +936,24 @@ scope class Painter{
 		}
 	}
 
+	version(D_Version2) {
+		import std.format;
+		void drawTextf(T...)(Point where, T args) {
+			char[] t;
+			t.length = 80;
+			int a = 0;
+			void putc(dchar c){
+				if(a == t.length)
+					t.length = t.length + 80;
+				t[a] = cast(char) c;
+				a++;
+			}
+			formattedWrite(&putc, args);
+			t.length = a;
+
+			drawText(where, t);
+		}
+	} else
 	void drawTextf(Point where, ...){
 		char[] t;
 		t.length = 80;

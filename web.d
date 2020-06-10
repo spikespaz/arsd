@@ -1,5 +1,25 @@
-/// magic web wrapper
+/++
+	Old magic web wrapper - one of my first applications of CT reflection. Given a class of fairly ordinary C code, it automatically creates HTML pages and forms, a Javascript file to access the functions from the client, and JSON based api responses. I do $(I not) recommend it for new projects though, as a replacement is now built into [arsd.cgi].
++/
 module arsd.web;
+
+
+static if(__VERSION__ <= 2076) {
+	// compatibility shims with gdc
+	enum JSONType {
+		object = JSON_TYPE.OBJECT,
+		null_ = JSON_TYPE.NULL,
+		false_ = JSON_TYPE.FALSE,
+		true_ = JSON_TYPE.TRUE,
+		integer = JSON_TYPE.INTEGER,
+		float_ = JSON_TYPE.FLOAT,
+		array = JSON_TYPE.ARRAY,
+		string = JSON_TYPE.STRING,
+		uinteger = JSON_TYPE.UINTEGER
+	}
+}
+
+
 
 // it would be nice to be able to add meta info to a returned envelope
 
@@ -1555,7 +1575,7 @@ void run(Provider)(Cgi cgi, Provider instantiation, size_t pathInfoStartingPoint
 				cgi.setResponseContentType("text/csv");
 				cgi.header("Content-Disposition: attachment; filename=\"export.csv\"");
 
-				if(result.result.type == JSON_TYPE.STRING) {
+				if(result.result.type == JSONType.string) {
 					cgi.write(result.result.str, true);
 				} else assert(0);
 			break;
@@ -1566,7 +1586,7 @@ void run(Provider)(Cgi cgi, Provider instantiation, size_t pathInfoStartingPoint
 				cgi.setResponseContentType("text/plain");
 
 				if(result.success) {
-					if(result.result.type == JSON_TYPE.STRING) {
+					if(result.result.type == JSONType.string) {
 						cgi.write(result.result.str, true);
 					} else {
 						cgi.write(toJSON(result.result), true);
@@ -1580,7 +1600,7 @@ void run(Provider)(Cgi cgi, Provider instantiation, size_t pathInfoStartingPoint
 			default:
 				cgi.setResponseContentType("text/html; charset=utf-8");
 
-				if(result.result.type == JSON_TYPE.STRING) {
+				if(result.result.type == JSONType.string) {
 					auto returned = result.result.str;
 
 					if(envelopeFormat != "html") {
@@ -2156,7 +2176,7 @@ JSONValue toJsonValue(T, R = ApiProvider)(T a, string formatToStringAs = null, R
 	static if(is(T == typeof(null)) || is(T == void*)) {
 		/* void* goes here too because we don't know how to make it work... */
 		val.object = null;
-		//val.type = JSON_TYPE.NULL;
+		//val.type = JSONType.null_;
 	} else static if(is(T == JSONValue)) {
 		val = a;
 	} else static if(__traits(compiles, val = a.makeJsonValue())) {
@@ -2165,57 +2185,57 @@ JSONValue toJsonValue(T, R = ApiProvider)(T a, string formatToStringAs = null, R
 
 	// FIXME: should we special case something like struct Html?
 	} else static if(is(T : DateTime)) {
-		//val.type = JSON_TYPE.STRING;
+		//val.type = JSONType.string;
 		val.str = a.toISOExtString();
 	} else static if(is(T : Element)) {
 		if(a is null) {
-			//val.type = JSON_TYPE.NULL;
+			//val.type = JSONType.null_;
 			val = null;
 		} else {
-			//val.type = JSON_TYPE.STRING;
+			//val.type = JSONType.string;
 			val.str = a.toString();
 		}
 	} else static if(is(T == long)) {
 		// FIXME: let's get a better range... I think it goes up to like 1 << 50 on positive and negative
 		// but this works for now
 		if(a < int.max && a > int.min) {
-			//val.type = JSON_TYPE.INTEGER;
+			//val.type = JSONType.integer;
 			val.integer = to!long(a);
 		} else {
 			// WHY? because javascript can't actually store all 64 bit numbers correctly
-			//val.type = JSON_TYPE.STRING;
+			//val.type = JSONType.string;
 			val.str = to!string(a);
 		}
 	} else static if(isIntegral!(T)) {
-		//val.type = JSON_TYPE.INTEGER;
+		//val.type = JSONType.integer;
 		val.integer = to!long(a);
 	} else static if(isFloatingPoint!(T)) {
-		//val.type = JSON_TYPE.FLOAT;
+		//val.type = JSONType.float_;
 		val.floating = to!real(a);
 	} else static if(isPointer!(T)) {
 		if(a is null) {
-			//val.type = JSON_TYPE.NULL;
+			//val.type = JSONType.null_;
 			val = null;
 		} else {
 			val = toJsonValue!(typeof(*a), R)(*a, formatToStringAs, api);
 		}
 	} else static if(is(T == bool)) {
 		if(a == true)
-			val = true; // .type = JSON_TYPE.TRUE;
+			val = true; // .type = JSONType.true_;
 		if(a == false)
-			val = false; // .type = JSON_TYPE.FALSE;
+			val = false; // .type = JSONType.false_;
 	} else static if(isSomeString!(T)) {
-		//val.type = JSON_TYPE.STRING;
+		//val.type = JSONType.string;
 		val.str = to!string(a);
 	} else static if(isAssociativeArray!(T)) {
-		//val.type = JSON_TYPE.OBJECT;
+		//val.type = JSONType.object;
 		JSONValue[string] valo;
 		foreach(k, v; a) {
 			valo[to!string(k)] = toJsonValue!(typeof(v), R)(v, formatToStringAs, api);
 		}
 		val = valo;
 	} else static if(isArray!(T)) {
-		//val.type = JSON_TYPE.ARRAY;
+		//val.type = JSONType.array;
 		JSONValue[] arr;
 		arr.length = a.length;
 		foreach(i, v; a) {
@@ -2224,7 +2244,7 @@ JSONValue toJsonValue(T, R = ApiProvider)(T a, string formatToStringAs = null, R
 
 		val.array = arr;
 	} else static if(is(T == struct)) { // also can do all members of a struct...
-		//val.type = JSON_TYPE.OBJECT;
+		//val.type = JSONType.object;
 
 		JSONValue[string] valo;
 
@@ -2237,20 +2257,20 @@ JSONValue toJsonValue(T, R = ApiProvider)(T a, string formatToStringAs = null, R
 			//static if(__traits(compiles, __traits(getMember, a, member)))
 		val = valo;
 	} else { /* our catch all is to just do strings */
-		//val.type = JSON_TYPE.STRING;
+		//val.type = JSONType.string;
 		val.str = to!string(a);
 		// FIXME: handle enums
 	}
 
 
 	// don't want json because it could recurse
-	if(val.type == JSON_TYPE.OBJECT && formatToStringAs !is null && formatToStringAs != "json") {
+	if(val.type == JSONType.object && formatToStringAs !is null && formatToStringAs != "json") {
 		JSONValue formatted;
-		//formatted.type = JSON_TYPE.STRING;
+		//formatted.type = JSONType.string;
 		formatted.str = "";
 
 		formatAs!(T, R)(a, formatToStringAs, api, &formatted, null /* only doing one level of special formatting */);
-		assert(formatted.type == JSON_TYPE.STRING);
+		assert(formatted.type == JSONType.string);
 		val.object["formattedSecondarily"] = formatted;
 	}
 
@@ -2565,7 +2585,7 @@ type fromUrlParam(type)(in string ofInterest, in string name, in string[][string
 		}
 	} else static if(is(type == enum)) {
 		sw: switch(ofInterest) {
-			static foreach(N; __traits(allMembers, type)) {
+			/*static*/ foreach(N; __traits(allMembers, type)) {
 			case N:
 				ret = __traits(getMember, type, N);
 				break sw;
@@ -2621,7 +2641,7 @@ WrapperFunction generateWrapper(alias ObjectType, string funName, alias f, R)(Re
 
 		JSONValue returnValue;
 		returnValue.str = "";
-		//returnValue.type = JSON_TYPE.STRING;
+		//returnValue.type = JSONType.string;
 
 		auto instantiation = getMemberDelegate!(ObjectType, funName)(cast(ObjectType) object);
 
@@ -3378,33 +3398,33 @@ class Session {
 	private static string[string] loadDataFromJson(string json) {
 		string[string] data = null;
 		auto obj = parseJSON(json);
-		enforce(obj.type == JSON_TYPE.OBJECT);
+		enforce(obj.type == JSONType.object);
 		foreach(k, v; obj.object) {
 			string ret;
 			final switch(v.type) {
-				case JSON_TYPE.STRING:
+				case JSONType.string:
 					ret = v.str;
 				break;
-				case JSON_TYPE.UINTEGER:
+				case JSONType.uinteger:
 					ret = to!string(v.integer);
 				break;
-				case JSON_TYPE.INTEGER:
+				case JSONType.integer:
 					ret = to!string(v.integer);
 				break;
-				case JSON_TYPE.FLOAT:
+				case JSONType.float_:
 					ret = to!string(v.floating);
 				break;
-				case JSON_TYPE.OBJECT:
-				case JSON_TYPE.ARRAY:
+				case JSONType.object:
+				case JSONType.array:
 					enforce(0, "invalid session data");
 				break;
-				case JSON_TYPE.TRUE:
+				case JSONType.true_:
 					ret = "true";
 				break;
-				case JSON_TYPE.FALSE:
+				case JSONType.false_:
 					ret = "false";
 				break;
-				case JSON_TYPE.NULL:
+				case JSONType.null_:
 					ret = null;
 				break;
 			}

@@ -1,4 +1,4 @@
-// Copyright 2013-2019, Adam D. Ruppe.
+// Copyright 2013-2020, Adam D. Ruppe.
 /++
 	This is version 2 of my http/1.1 client implementation.
 	
@@ -14,7 +14,15 @@
 +/
 module arsd.http2;
 
+// FIXME: I think I want to disable sigpipe here too.
+
 import std.uri : encodeComponent;
+
+debug(arsd_http2_verbose) debug=arsd_http2;
+
+debug(arsd_http2) import std.stdio : writeln;
+
+version=arsd_http_internal_implementation;
 
 version(without_openssl) {}
 else {
@@ -22,6 +30,17 @@ version=use_openssl;
 version=with_openssl;
 version(older_openssl) {} else
 version=newer_openssl;
+}
+
+version(arsd_http_winhttp_implementation) {
+	pragma(lib, "winhttp")
+	import core.sys.windows.winhttp;
+	// FIXME: alter the dub package file too
+
+	// https://docs.microsoft.com/en-us/windows/win32/api/winhttp/nf-winhttp-winhttpreaddata
+	// https://docs.microsoft.com/en-us/windows/win32/api/winhttp/nf-winhttp-winhttpsendrequest
+	// https://docs.microsoft.com/en-us/windows/win32/api/winhttp/nf-winhttp-winhttpopenrequest
+	// https://docs.microsoft.com/en-us/windows/win32/api/winhttp/nf-winhttp-winhttpconnect
 }
 
 
@@ -55,8 +74,8 @@ import core.time;
 // FIXME: check Transfer-Encoding: gzip always
 
 version(with_openssl) {
-	pragma(lib, "crypto");
-	pragma(lib, "ssl");
+	//pragma(lib, "crypto");
+	//pragma(lib, "ssl");
 }
 
 /+
@@ -77,6 +96,9 @@ HttpRequest get(string url) {
 	return request;
 }
 
+/**
+	Do not forget to call `waitForCompletion()` on the returned object!
+*/
 HttpRequest post(string url, string[string] req) {
 	auto client = new HttpClient();
 	ubyte[] bdata;
@@ -152,6 +174,17 @@ struct HttpResponse {
 
 	string contentType; /// The content type header
 	string location; /// The location header
+
+	/// the charset out of content type, if present. `null` if not.
+	string contentTypeCharset() {
+		auto idx = contentType.indexOf("charset=");
+		if(idx == -1)
+			return null;
+		auto c = contentType[idx + "charset=".length .. $].strip;
+		if(c.length)
+			return c;
+		return null;
+	}
 
 	string[string] cookies; /// Names and values of cookies set in the response.
 
@@ -290,8 +323,25 @@ import std.conv;
 import std.range;
 
 
+private AddressFamily family(string unixSocketPath) {
+	if(unixSocketPath.length)
+		return AddressFamily.UNIX;
+	else // FIXME: what about ipv6?
+		return AddressFamily.INET;
+}
 
-// Copy pasta from cgi.d, then stripped down
+version(Windows)
+private class UnixAddress : Address {
+	this(string) {
+		throw new Exception("No unix address support on this system in lib yet :(");
+	}
+	override sockaddr* name() { assert(0); }
+	override const(sockaddr)* name() const { assert(0); }
+	override int nameLen() const { assert(0); }
+}
+
+
+// Copy pasta from cgi.d, then stripped down. unix path thing added tho
 ///
 struct Uri {
 	alias toString this; // blargh idk a url really is a string, but should it be implicit?
@@ -309,6 +359,22 @@ struct Uri {
 	/// Breaks down a uri string to its components
 	this(string uri) {
 		reparse(uri);
+	}
+
+	private string unixSocketPath = null;
+	/// Indicates it should be accessed through a unix socket instead of regular tcp. Returns new version without modifying this object.
+	Uri viaUnixSocket(string path) const {
+		Uri copy = this;
+		copy.unixSocketPath = path;
+		return copy;
+	}
+
+	/// Goes through a unix socket in the abstract namespace (linux only). Returns new version without modifying this object.
+	version(linux)
+	Uri viaAbstractSocket(string path) const {
+		Uri copy = this;
+		copy.unixSocketPath = "\0" ~ path;
+		return copy;
 	}
 
 	private void reparse(string uri) {
@@ -517,6 +583,11 @@ struct Uri {
 
 		n.removeDots();
 
+		// if still basically talking to the same thing, we should inherit the unix path
+		// too since basically the unix path is saying for this service, always use this override.
+		if(n.host == baseUrl.host && n.scheme == baseUrl.scheme && n.port == baseUrl.port)
+			n.unixSocketPath = baseUrl.unixSocketPath;
+
 		return n;
 	}
 
@@ -583,6 +654,183 @@ struct BasicAuth {
 
 */
 class HttpRequest {
+
+	/// Automatically follow a redirection?
+	bool followLocation = false;
+
+	this() {
+	}
+
+	///
+	this(Uri where, HttpVerb method) {
+		populateFromInfo(where, method);
+	}
+
+	/// Final url after any redirections
+	string finalUrl;
+
+	void populateFromInfo(Uri where, HttpVerb method) {
+		auto parts = where;
+		finalUrl = where.toString();
+		requestParameters.method = method;
+		requestParameters.unixSocketPath = where.unixSocketPath;
+		requestParameters.host = parts.host;
+		requestParameters.port = cast(ushort) parts.port;
+		requestParameters.ssl = parts.scheme == "https";
+		if(parts.port == 0)
+			requestParameters.port = requestParameters.ssl ? 443 : 80;
+		requestParameters.uri = parts.path.length ? parts.path : "/";
+		if(parts.query.length) {
+			requestParameters.uri ~= "?";
+			requestParameters.uri ~= parts.query;
+		}
+	}
+
+	~this() {
+	}
+
+	ubyte[] sendBuffer;
+
+	HttpResponse responseData;
+	private HttpClient parentClient;
+
+	size_t bodyBytesSent;
+	size_t bodyBytesReceived;
+
+	State state_;
+	State state() { return state_; }
+	State state(State s) {
+		assert(state_ != State.complete);
+		return state_ = s;
+	}
+	/// Called when data is received. Check the state to see what data is available.
+	void delegate(HttpRequest) onDataReceived;
+
+	enum State {
+		/// The request has not yet been sent
+		unsent,
+
+		/// The send() method has been called, but no data is
+		/// sent on the socket yet because the connection is busy.
+		pendingAvailableConnection,
+
+		/// The headers are being sent now
+		sendingHeaders,
+
+		/// The body is being sent now
+		sendingBody,
+
+		/// The request has been sent but we haven't received any response yet
+		waitingForResponse,
+
+		/// We have received some data and are currently receiving headers
+		readingHeaders,
+
+		/// All headers are available but we're still waiting on the body
+		readingBody,
+
+		/// The request is complete.
+		complete,
+
+		/// The request is aborted, either by the abort() method, or as a result of the server disconnecting
+		aborted
+	}
+
+	/// Sends now and waits for the request to finish, returning the response.
+	HttpResponse perform() {
+		send();
+		return waitForCompletion();
+	}
+
+	/// Sends the request asynchronously.
+	void send() {
+		sendPrivate(true);
+	}
+
+	private void sendPrivate(bool advance) {
+		if(state != State.unsent && state != State.aborted)
+			return; // already sent
+		string headers;
+
+		headers ~= to!string(requestParameters.method) ~ " "~requestParameters.uri;
+		if(requestParameters.useHttp11)
+			headers ~= " HTTP/1.1\r\n";
+		else
+			headers ~= " HTTP/1.0\r\n";
+		headers ~= "Host: "~requestParameters.host~"\r\n";
+		if(requestParameters.userAgent.length)
+			headers ~= "User-Agent: "~requestParameters.userAgent~"\r\n";
+		if(requestParameters.contentType.length)
+			headers ~= "Content-Type: "~requestParameters.contentType~"\r\n";
+		if(requestParameters.authorization.length)
+			headers ~= "Authorization: "~requestParameters.authorization~"\r\n";
+		if(requestParameters.bodyData.length)
+			headers ~= "Content-Length: "~to!string(requestParameters.bodyData.length)~"\r\n";
+		if(requestParameters.acceptGzip)
+			headers ~= "Accept-Encoding: gzip\r\n";
+		if(requestParameters.keepAlive)
+			headers ~= "Connection: keep-alive\r\n";
+
+		foreach(header; requestParameters.headers)
+			headers ~= header ~ "\r\n";
+
+		headers ~= "\r\n";
+
+		sendBuffer = cast(ubyte[]) headers ~ requestParameters.bodyData;
+
+		// import std.stdio; writeln("******* ", sendBuffer);
+
+		responseData = HttpResponse.init;
+		responseData.requestParameters = requestParameters;
+		bodyBytesSent = 0;
+		bodyBytesReceived = 0;
+		state = State.pendingAvailableConnection;
+
+		bool alreadyPending = false;
+		foreach(req; pending)
+			if(req is this) {
+				alreadyPending = true;
+				break;
+			}
+		if(!alreadyPending) {
+			pending ~= this;
+		}
+
+		if(advance)
+			HttpRequest.advanceConnections();
+	}
+
+
+	/// Waits for the request to finish or timeout, whichever comes first.
+	HttpResponse waitForCompletion() {
+		while(state != State.aborted && state != State.complete) {
+			if(state == State.unsent)
+				send();
+			if(auto err = HttpRequest.advanceConnections())
+				throw new Exception("waitForCompletion got err " ~ to!string(err));
+		}
+
+		return responseData;
+	}
+
+	/// Aborts this request.
+	void abort() {
+		this.state = State.aborted;
+		// FIXME
+	}
+
+	HttpRequestParameters requestParameters; ///
+
+	version(arsd_http_winhttp_implementation) {
+		public static void resetInternals() {
+
+		}
+
+		static assert(0, "implementation not finished");
+	}
+
+
+	version(arsd_http_internal_implementation) {
 	private static {
 		// we manage the actual connections. When a request is made on a particular
 		// host, we try to reuse connections. We may open more than one connection per
@@ -608,19 +856,27 @@ class HttpRequest {
 			}
 		}
 
-		Socket getOpenSocketOnHost(string host, ushort port, bool ssl) {
+		Socket getOpenSocketOnHost(string host, ushort port, bool ssl, string unixSocketPath) {
+
 			Socket openNewConnection() {
 				Socket socket;
 				if(ssl) {
 					version(with_openssl)
-						socket = new SslClientSocket(AddressFamily.INET, SocketType.STREAM);
+						socket = new SslClientSocket(family(unixSocketPath), SocketType.STREAM, host);
 					else
 						throw new Exception("SSL not compiled in");
 				} else
-					socket = new Socket(AddressFamily.INET, SocketType.STREAM);
+					socket = new Socket(family(unixSocketPath), SocketType.STREAM);
 
-				socket.connect(new InternetAddress(host, port));
-				debug(arsd_http2) writeln("opening to ", host, ":", port);
+				if(unixSocketPath) {
+					import std.stdio; writeln(cast(ubyte[]) unixSocketPath);
+					socket.connect(new UnixAddress(unixSocketPath));
+				} else {
+					// FIXME: i should prolly do ipv6 if available too.
+					socket.connect(new InternetAddress(host, port));
+				}
+
+				debug(arsd_http2) writeln("opening to ", host, ":", port, " ", cast(void*) socket);
 				assert(socket.handle() !is socket_t.init);
 				return socket;
 			}
@@ -678,7 +934,7 @@ class HttpRequest {
 		SocketSet writeSet;
 
 
-		void advanceConnections() {
+		int advanceConnections() {
 			if(readSet is null)
 				readSet = new SocketSet();
 			if(writeSet is null)
@@ -699,7 +955,7 @@ class HttpRequest {
 					continue;
 				}
 
-				auto socket = getOpenSocketOnHost(pc.requestParameters.host, pc.requestParameters.port, pc.requestParameters.ssl);
+				auto socket = getOpenSocketOnHost(pc.requestParameters.host, pc.requestParameters.port, pc.requestParameters.ssl, pc.requestParameters.unixSocketPath);
 
 				if(socket !is null) {
 					activeRequestOnSocket[socket] = pc;
@@ -717,43 +973,63 @@ class HttpRequest {
 			readSet.reset();
 			writeSet.reset();
 
+			bool hadOne = false;
+
 			// active requests need to be read or written to
 			foreach(sock, request; activeRequestOnSocket) {
 				// check the other sockets just for EOF, if they close, take them out of our list,
 				// we'll reopen if needed upon request.
 				readSet.add(sock);
-				if(request.state == State.sendingHeaders || request.state == State.sendingBody)
+				hadOne = true;
+				if(request.state == State.sendingHeaders || request.state == State.sendingBody) {
 					writeSet.add(sock);
+					hadOne = true;
+				}
 			}
 
+			if(!hadOne)
+				return 1; // automatic timeout, nothing to do
+
 			tryAgain:
-			auto got = Socket.select(readSet, writeSet, null, 10.seconds /* timeout */);
-			if(got == 0) { /* timeout */
+			auto selectGot = Socket.select(readSet, writeSet, null, 10.seconds /* timeout */);
+			if(selectGot == 0) { /* timeout */
 				// timeout
-			} else if(got == -1) /* interrupted */
+				return 1;
+			} else if(selectGot == -1) { /* interrupted */
+				/*
+				version(Posix) {
+					import core.stdc.errno;
+					if(errno != EINTR)
+						throw new Exception("select error: " ~ to!string(errno));
+				}
+				*/
 				goto tryAgain;
-			else { /* ready */
+			} else { /* ready */
 				Socket[16] inactive;
 				int inactiveCount = 0;
 				foreach(sock, request; activeRequestOnSocket) {
 					if(readSet.isSet(sock)) {
 						keep_going:
 						auto got = sock.receive(buffer);
-						debug(arsd_http2) writeln("====PACKET ",got,"=====",cast(string)buffer[0 .. got],"===/PACKET===");
+						debug(arsd_http2_verbose) writeln("====PACKET ",got,"=====",cast(string)buffer[0 .. got],"===/PACKET===");
 						if(got < 0) {
 							throw new Exception("receive error");
 						} else if(got == 0) {
 							// remote side disconnected
 							debug(arsd_http2) writeln("remote disconnect");
-							request.state = State.aborted;
+							if(request.state != State.complete)
+								request.state = State.aborted;
 							inactive[inactiveCount++] = sock;
+							sock.close();
 							loseSocket(request.requestParameters.host, request.requestParameters.port, request.requestParameters.ssl, sock);
 						} else {
 							// data available
-							request.handleIncomingData(buffer[0 .. got]);
+							auto stillAlive = request.handleIncomingData(buffer[0 .. got]);
 
-							if(request.state == HttpRequest.State.complete) {
+							if(!stillAlive || request.state == HttpRequest.State.complete || request.state == HttpRequest.State.aborted) {
+								//import std.stdio; writeln(cast(void*) sock, " ", stillAlive, " ", request.state);
 								inactive[inactiveCount++] = sock;
+								continue;
 							// reuse the socket for another pending request, if we can
 							}
 						}
@@ -775,22 +1051,33 @@ class HttpRequest {
 					if(writeSet.isSet(sock)) {
 						assert(request.sendBuffer.length);
 						auto sent = sock.send(request.sendBuffer);
-						debug(arsd_http2) writeln(cast(string) request.sendBuffer);
+						debug(arsd_http2_verbose) writeln(cast(void*) sock, "<send>", cast(string) request.sendBuffer, "</send>");
 						if(sent <= 0)
 							throw new Exception("send error " ~ lastSocketError);
 						request.sendBuffer = request.sendBuffer[sent .. $];
-						request.state = State.waitingForResponse;
+						if(request.sendBuffer.length == 0) {
+							request.state = State.waitingForResponse;
+						}
 					}
 				}
 
 				foreach(s; inactive[0 .. inactiveCount]) {
-					debug(arsd_http2) writeln("removing socket from active list");
+					debug(arsd_http2) writeln("removing socket from active list ", cast(void*) s);
 					activeRequestOnSocket.remove(s);
 				}
 			}
 
 			// we've completed a request, are there any more pending connection? if so, send them now
+
+			return 0;
 		}
+	}
+
+	public static void resetInternals() {
+		socketsPerHost = null;
+		activeRequestOnSocket = null;
+		pending = null;
+
 	}
 
 	struct HeaderReadingState {
@@ -820,8 +1107,9 @@ class HttpRequest {
 
 	const(ubyte)[] leftoverDataFromLastTime;
 
-	void handleIncomingData(scope const ubyte[] dataIn) {
-	debug(arsd_http2) writeln("handleIncomingData, state: ", state);
+	bool handleIncomingData(scope const ubyte[] dataIn) {
+		bool stillAlive = true;
+		debug(arsd_http2) writeln("handleIncomingData, state: ", state);
 		if(state == State.waitingForResponse) {
 			state = State.readingHeaders;
 			headerReadingState = HeaderReadingState.init;
@@ -861,6 +1149,9 @@ class HttpRequest {
 					if(colon == -1)
 						return;
 					auto name = header[0 .. colon];
+					if(colon + 1 == header.length || colon + 2 == header.length) // assuming a space there
+						return; // empty header, idk
+					assert(colon + 2 < header.length, header);
 					auto value = header[colon + 2 .. $]; // skipping the colon itself and the following space
 
 					switch(name) {
@@ -992,7 +1283,7 @@ class HttpRequest {
 									bodyReadingState.contentLengthRemaining += power * val;
 									power *= 16;
 								}
-								debug(arsd_http2) writeln("Chunk length: ", bodyReadingState.contentLengthRemaining);
+								debug(arsd_http2_verbose) writeln("Chunk length: ", bodyReadingState.contentLengthRemaining);
 								bodyReadingState.chunkedState = 1;
 								data = data[a + 1 .. $];
 								goto start_over;
@@ -1022,7 +1313,7 @@ class HttpRequest {
 								responseData.content ~= newData;
 
 							bodyReadingState.contentLengthRemaining -= newData.length;
-							debug(arsd_http2) writeln("clr: ", bodyReadingState.contentLengthRemaining, " " , a, " ", can);
+							debug(arsd_http2_verbose) writeln("clr: ", bodyReadingState.contentLengthRemaining, " " , a, " ", can);
 							assert(bodyReadingState.contentLengthRemaining >= 0);
 							if(bodyReadingState.contentLengthRemaining == 0) {
 								bodyReadingState.chunkedState = 3;
@@ -1086,11 +1377,25 @@ class HttpRequest {
 						responseData.content = cast(ubyte[]) n;
 						//responseData.content ~= cast(ubyte[]) uncompress.flush();
 					}
-					state = State.complete;
-					responseData.contentText = cast(string) responseData.content;
-					// FIXME
-					//if(closeSocketWhenComplete)
-						//socket.close();
+					if(followLocation && responseData.location.length) {
+						static bool first = true;
+						//version(DigitalMars) if(!first) asm { int 3; }
+						populateFromInfo(Uri(responseData.location), HttpVerb.GET);
+						import std.stdio; writeln("redirected to ", responseData.location);
+						first = false;
+						responseData = HttpResponse.init;
+						headerReadingState = HeaderReadingState.init;
+						bodyReadingState = BodyReadingState.init;
+						state = State.unsent;
+						stillAlive = false;
+						sendPrivate(false);
+					} else {
+						state = State.complete;
+						responseData.contentText = cast(string) responseData.content;
+						// FIXME
+						//if(closeSocketWhenComplete)
+							//socket.close();
+					}
 				}
 			}
 		}
@@ -1099,143 +1404,11 @@ class HttpRequest {
 			leftoverDataFromLastTime = data.dup;
 		else
 			leftoverDataFromLastTime = null;
+
+		return stillAlive;
 	}
 
-	this() {
 	}
-
-	///
-	this(Uri where, HttpVerb method) {
-		auto parts = where;
-		requestParameters.method = method;
-		requestParameters.host = parts.host;
-		requestParameters.port = cast(ushort) parts.port;
-		requestParameters.ssl = parts.scheme == "https";
-		if(parts.port == 0)
-			requestParameters.port = requestParameters.ssl ? 443 : 80;
-		requestParameters.uri = parts.path.length ? parts.path : "/";
-		if(parts.query.length) {
-			requestParameters.uri ~= "?";
-			requestParameters.uri ~= parts.query;
-		}
-	}
-
-	~this() {
-	}
-
-	ubyte[] sendBuffer;
-
-	HttpResponse responseData;
-	private HttpClient parentClient;
-
-	size_t bodyBytesSent;
-	size_t bodyBytesReceived;
-
-	State state_;
-	State state() { return state_; }
-	State state(State s) {
-		assert(state_ != State.complete);
-		return state_ = s;
-	}
-	/// Called when data is received. Check the state to see what data is available.
-	void delegate(HttpRequest) onDataReceived;
-
-	enum State {
-		/// The request has not yet been sent
-		unsent,
-
-		/// The send() method has been called, but no data is
-		/// sent on the socket yet because the connection is busy.
-		pendingAvailableConnection,
-
-		/// The headers are being sent now
-		sendingHeaders,
-
-		/// The body is being sent now
-		sendingBody,
-
-		/// The request has been sent but we haven't received any response yet
-		waitingForResponse,
-
-		/// We have received some data and are currently receiving headers
-		readingHeaders,
-
-		/// All headers are available but we're still waiting on the body
-		readingBody,
-
-		/// The request is complete.
-		complete,
-
-		/// The request is aborted, either by the abort() method, or as a result of the server disconnecting
-		aborted
-	}
-
-	/// Sends now and waits for the request to finish, returning the response.
-	HttpResponse perform() {
-		send();
-		return waitForCompletion();
-	}
-
-	/// Sends the request asynchronously.
-	void send() {
-		if(state != State.unsent && state != State.aborted)
-			return; // already sent
-		string headers;
-
-		headers ~= to!string(requestParameters.method) ~ " "~requestParameters.uri;
-		if(requestParameters.useHttp11)
-			headers ~= " HTTP/1.1\r\n";
-		else
-			headers ~= " HTTP/1.0\r\n";
-		headers ~= "Host: "~requestParameters.host~"\r\n";
-		if(requestParameters.userAgent.length)
-			headers ~= "User-Agent: "~requestParameters.userAgent~"\r\n";
-		if(requestParameters.contentType.length)
-			headers ~= "Content-Type: "~requestParameters.contentType~"\r\n";
-		if(requestParameters.authorization.length)
-			headers ~= "Authorization: "~requestParameters.authorization~"\r\n";
-		if(requestParameters.bodyData.length)
-			headers ~= "Content-Length: "~to!string(requestParameters.bodyData.length)~"\r\n";
-		if(requestParameters.acceptGzip)
-			headers ~= "Accept-Encoding: gzip\r\n";
-
-		foreach(header; requestParameters.headers)
-			headers ~= header ~ "\r\n";
-
-		headers ~= "\r\n";
-
-		sendBuffer = cast(ubyte[]) headers ~ requestParameters.bodyData;
-
-		responseData = HttpResponse.init;
-		responseData.requestParameters = requestParameters;
-		bodyBytesSent = 0;
-		bodyBytesReceived = 0;
-		state = State.pendingAvailableConnection;
-
-		pending ~= this;
-
-		HttpRequest.advanceConnections();
-	}
-
-
-	/// Waits for the request to finish or timeout, whichever comes furst.
-	HttpResponse waitForCompletion() {
-		while(state != State.aborted && state != State.complete) {
-			if(state == State.unsent)
-				send();
-			HttpRequest.advanceConnections();
-		}
-
-		return responseData;
-	}
-
-	/// Aborts this request.
-	void abort() {
-		this.state = State.aborted;
-		// FIXME
-	}
-
-	HttpRequestParameters requestParameters; ///
 }
 
 ///
@@ -1245,6 +1418,7 @@ struct HttpRequestParameters {
 	// debugging
 	bool useHttp11 = true; ///
 	bool acceptGzip = true; ///
+	bool keepAlive = true; ///
 
 	// the request itself
 	HttpVerb method; ///
@@ -1263,6 +1437,8 @@ struct HttpRequestParameters {
 
 	string contentType; ///
 	ubyte[] bodyData; ///
+
+	string unixSocketPath;
 }
 
 interface IHttpClient {
@@ -1310,9 +1486,7 @@ class HttpClient {
 	/* Protocol restrictions, useful to disable when debugging servers */
 	bool useHttp11 = true; ///
 	bool acceptGzip = true; ///
-
-	/// Automatically follow a redirection?
-	bool followLocation = false; /// NOT IMPLEMENTED
+	bool keepAlive = true; ///
 
 	///
 	@property Uri location() {
@@ -1328,11 +1502,14 @@ class HttpClient {
 		currentDomain = where.host;
 		auto request = new HttpRequest(currentUrl, method);
 
+		request.followLocation = true;
+
 		request.requestParameters.userAgent = userAgent;
 		request.requestParameters.authorization = authorization;
 
 		request.requestParameters.useHttp11 = this.useHttp11;
 		request.requestParameters.acceptGzip = this.acceptGzip;
+		request.requestParameters.keepAlive = this.keepAlive;
 
 		return request;
 	}
@@ -1350,6 +1527,7 @@ class HttpClient {
 
 		request.requestParameters.useHttp11 = this.useHttp11;
 		request.requestParameters.acceptGzip = this.acceptGzip;
+		request.requestParameters.keepAlive = this.keepAlive;
 
 		request.requestParameters.bodyData = bodyData;
 		request.requestParameters.contentType = contentType;
@@ -1450,86 +1628,245 @@ void main() {
 }
 
 
-// From sslsocket.d
+// From sslsocket.d, but this is the maintained version!
 version(use_openssl) {
 	alias SslClientSocket = OpenSslSocket;
 
 	// macros in the original C
-	version(newer_openssl) {
-		void SSL_library_init() {
-			OPENSSL_init_ssl(0, null);
-		}
-		void OpenSSL_add_all_ciphers() {
-			OPENSSL_init_crypto(0 /*OPENSSL_INIT_ADD_ALL_CIPHERS*/, null);
-		}
-		void OpenSSL_add_all_digests() {
-			OPENSSL_init_crypto(0 /*OPENSSL_INIT_ADD_ALL_DIGESTS*/, null);
-		}
+	SSL_METHOD* SSLv23_client_method() {
+		if(ossllib.SSLv23_client_method)
+			return ossllib.SSLv23_client_method();
+		else
+			return ossllib.TLS_client_method();
+	}
 
-		void SSL_load_error_strings() {
-			OPENSSL_init_ssl(0x00200000L, null);
-		}
+	struct SSL {}
+	struct SSL_CTX {}
+	struct SSL_METHOD {}
+	enum SSL_VERIFY_NONE = 0;
 
-		SSL_METHOD* SSLv23_client_method() {
-			return TLS_client_method();
+	struct ossllib {
+		__gshared static extern(C) {
+			/* these are only on older openssl versions { */
+				int function() SSL_library_init;
+				void function() SSL_load_error_strings;
+				SSL_METHOD* function() SSLv23_client_method;
+			/* } */
+
+			void function(ulong, void*) OPENSSL_init_ssl;
+
+			SSL_CTX* function(const SSL_METHOD*) SSL_CTX_new;
+			SSL* function(SSL_CTX*) SSL_new;
+			int function(SSL*, int) SSL_set_fd;
+			int function(SSL*) SSL_connect;
+			int function(SSL*, const void*, int) SSL_write;
+			int function(SSL*, void*, int) SSL_read;
+			@trusted nothrow @nogc int function(SSL*) SSL_shutdown;
+			void function(SSL*) SSL_free;
+			void function(SSL_CTX*) SSL_CTX_free;
+
+			int function(const SSL*) SSL_pending;
+
+			void function(SSL*, int, void*) SSL_set_verify;
+
+			void function(SSL*, int, c_long, void*) SSL_ctrl;
+
+			SSL_METHOD* function() SSLv3_client_method;
+			SSL_METHOD* function() TLS_client_method;
+
 		}
 	}
 
-	extern(C) {
-		version(newer_openssl) {} else {
-			int SSL_library_init();
-			void OpenSSL_add_all_ciphers();
-			void OpenSSL_add_all_digests();
-			void SSL_load_error_strings();
-			SSL_METHOD* SSLv23_client_method();
+	import core.stdc.config;
+
+	struct eallib {
+		__gshared static extern(C) {
+			/* these are only on older openssl versions { */
+				void function() OpenSSL_add_all_ciphers;
+				void function() OpenSSL_add_all_digests;
+			/* } */
+
+			void function(ulong, void*) OPENSSL_init_crypto;
+
+			void function(FILE*) ERR_print_errors_fp;
 		}
-		void OPENSSL_init_ssl(ulong, void*);
-		void OPENSSL_init_crypto(ulong, void*);
-
-		struct SSL {}
-		struct SSL_CTX {}
-		struct SSL_METHOD {}
-
-		SSL_CTX* SSL_CTX_new(const SSL_METHOD* method);
-		SSL* SSL_new(SSL_CTX*);
-		int SSL_set_fd(SSL*, int);
-		int SSL_connect(SSL*);
-		int SSL_write(SSL*, const void*, int);
-		int SSL_read(SSL*, void*, int);
-		void SSL_free(SSL*);
-		void SSL_CTX_free(SSL_CTX*);
-
-		int SSL_pending(const SSL*);
-
-		void SSL_set_verify(SSL*, int, void*);
-		enum SSL_VERIFY_NONE = 0;
-
-		SSL_METHOD* SSLv3_client_method();
-		SSL_METHOD* TLS_client_method();
-
-		void ERR_print_errors_fp(FILE*);
 	}
+
+
+	SSL_CTX* SSL_CTX_new(const SSL_METHOD* a) {
+		if(ossllib.SSL_CTX_new)
+			return ossllib.SSL_CTX_new(a);
+		else throw new Exception("SSL_CTX_new not loaded");
+	}
+	SSL* SSL_new(SSL_CTX* a) {
+		if(ossllib.SSL_new)
+			return ossllib.SSL_new(a);
+		else throw new Exception("SSL_new not loaded");
+	}
+	int SSL_set_fd(SSL* a, int b) {
+		if(ossllib.SSL_set_fd)
+			return ossllib.SSL_set_fd(a, b);
+		else throw new Exception("SSL_set_fd not loaded");
+	}
+	int SSL_connect(SSL* a) {
+		if(ossllib.SSL_connect)
+			return ossllib.SSL_connect(a);
+		else throw new Exception("SSL_connect not loaded");
+	}
+	int SSL_write(SSL* a, const void* b, int c) {
+		if(ossllib.SSL_write)
+			return ossllib.SSL_write(a, b, c);
+		else throw new Exception("SSL_write not loaded");
+	}
+	int SSL_read(SSL* a, void* b, int c) {
+		if(ossllib.SSL_read)
+			return ossllib.SSL_read(a, b, c);
+		else throw new Exception("SSL_read not loaded");
+	}
+	@trusted nothrow @nogc int SSL_shutdown(SSL* a) {
+		if(ossllib.SSL_shutdown)
+			return ossllib.SSL_shutdown(a);
+		assert(0);
+	}
+	void SSL_free(SSL* a) {
+		if(ossllib.SSL_free)
+			return ossllib.SSL_free(a);
+		else throw new Exception("SSL_free not loaded");
+	}
+	void SSL_CTX_free(SSL_CTX* a) {
+		if(ossllib.SSL_CTX_free)
+			return ossllib.SSL_CTX_free(a);
+		else throw new Exception("SSL_CTX_free not loaded");
+	}
+
+	int SSL_pending(const SSL* a) {
+		if(ossllib.SSL_pending)
+			return ossllib.SSL_pending(a);
+		else throw new Exception("SSL_pending not loaded");
+	}
+	void SSL_set_verify(SSL* a, int b, void* c) {
+		if(ossllib.SSL_set_verify)
+			return ossllib.SSL_set_verify(a, b, c);
+		else throw new Exception("SSL_set_verify not loaded");
+	}
+	void SSL_set_tlsext_host_name(SSL* a, const char* b) {
+		if(ossllib.SSL_ctrl)
+			return ossllib.SSL_ctrl(a, 55 /*SSL_CTRL_SET_TLSEXT_HOSTNAME*/, 0 /*TLSEXT_NAMETYPE_host_name*/, cast(void*) b);
+		else throw new Exception("SSL_set_tlsext_host_name not loaded");
+	}
+
+	SSL_METHOD* SSLv3_client_method() {
+		if(ossllib.SSLv3_client_method)
+			return ossllib.SSLv3_client_method();
+		else throw new Exception("SSLv3_client_method not loaded");
+	}
+	SSL_METHOD* TLS_client_method() {
+		if(ossllib.TLS_client_method)
+			return ossllib.TLS_client_method();
+		else throw new Exception("TLS_client_method not loaded");
+	}
+	void ERR_print_errors_fp(FILE* a) {
+		if(eallib.ERR_print_errors_fp)
+			return eallib.ERR_print_errors_fp(a);
+		else throw new Exception("ERR_print_errors_fp not loaded");
+	}
+
+
+	private __gshared void* ossllib_handle;
+	version(Windows)
+		private __gshared void* oeaylib_handle;
+	else
+		alias oeaylib_handle = ossllib_handle;
+	version(Posix)
+		private import core.sys.posix.dlfcn;
+	else version(Windows)
+		private import core.sys.windows.windows;
 
 	import core.stdc.stdio;
 
 	shared static this() {
-		SSL_library_init();
-		OpenSSL_add_all_ciphers();
-		OpenSSL_add_all_digests();
-		SSL_load_error_strings();
+		version(Posix)
+			ossllib_handle = dlopen("libssl.so", RTLD_NOW);
+		else version(Windows) {
+			ossllib_handle = LoadLibraryW("libssl32.dll"w.ptr);
+			oeaylib_handle = LoadLibraryW("libeay32.dll"w.ptr);
+		}
+
+		if(ossllib_handle is null)
+			throw new Exception("ssl fail open");
+
+		foreach(memberName; __traits(allMembers, ossllib)) {
+			alias t = typeof(__traits(getMember, ossllib, memberName));
+			version(Posix)
+				__traits(getMember, ossllib, memberName) = cast(t) dlsym(ossllib_handle, memberName);
+			else version(Windows) {
+				__traits(getMember, ossllib, memberName) = cast(t) GetProcAddress(ossllib_handle, memberName);
+			}
+		}
+
+		foreach(memberName; __traits(allMembers, eallib)) {
+			alias t = typeof(__traits(getMember, eallib, memberName));
+			version(Posix)
+				__traits(getMember, eallib, memberName) = cast(t) dlsym(oeaylib_handle, memberName);
+			else version(Windows) {
+				__traits(getMember, eallib, memberName) = cast(t) GetProcAddress(oeaylib_handle, memberName);
+			}
+		}
+
+
+		if(ossllib.SSL_library_init)
+			ossllib.SSL_library_init();
+		else if(ossllib.OPENSSL_init_ssl)
+			ossllib.OPENSSL_init_ssl(0, null);
+		else throw new Exception("couldn't init openssl");
+
+		if(eallib.OpenSSL_add_all_ciphers) {
+			eallib.OpenSSL_add_all_ciphers();
+			if(eallib.OpenSSL_add_all_digests is null)
+				throw new Exception("no add digests");
+			eallib.OpenSSL_add_all_digests();
+		} else if(eallib.OPENSSL_init_crypto)
+			eallib.OPENSSL_init_crypto(0 /*OPENSSL_INIT_ADD_ALL_CIPHERS and ALL_DIGESTS together*/, null);
+		else throw new Exception("couldn't init crypto openssl");
+
+		if(ossllib.SSL_load_error_strings)
+			ossllib.SSL_load_error_strings();
+		else if(ossllib.OPENSSL_init_ssl)
+			ossllib.OPENSSL_init_ssl(0x00200000L, null);
+		else throw new Exception("couldn't load openssl errors");
 	}
 
-	pragma(lib, "crypto");
-	pragma(lib, "ssl");
+	/+
+		// I'm just gonna let the OS clean this up on process termination because otherwise SSL_free
+		// might have trouble being run from the GC after this module is unloaded.
+	shared static ~this() {
+		if(ossllib_handle) {
+			version(Windows) {
+				FreeLibrary(oeaylib_handle);
+				FreeLibrary(ossllib_handle);
+			} else version(Posix)
+				dlclose(ossllib_handle);
+			ossllib_handle = null;
+		}
+		ossllib.tupleof = ossllib.tupleof.init;
+	}
+	+/
+
+	//pragma(lib, "crypto");
+	//pragma(lib, "ssl");
 
 	class OpenSslSocket : Socket {
 		private SSL* ssl;
 		private SSL_CTX* ctx;
-		private void initSsl(bool verifyPeer) {
+		private void initSsl(bool verifyPeer, string hostname) {
 			ctx = SSL_CTX_new(SSLv23_client_method());
 			assert(ctx !is null);
 
 			ssl = SSL_new(ctx);
+
+			if(hostname.length)
+			SSL_set_tlsext_host_name(ssl, toStringz(hostname));
+
 			if(!verifyPeer)
 				SSL_set_verify(ssl, SSL_VERIFY_NONE, null);
 			SSL_set_fd(ssl, cast(int) this.handle); // on win64 it is necessary to truncate, but the value is never large anyway see http://openssl.6102.n7.nabble.com/Sockets-windows-64-bit-td36169.html
@@ -1545,58 +1882,64 @@ version(use_openssl) {
 			if(SSL_connect(ssl) == -1) {
 				ERR_print_errors_fp(core.stdc.stdio.stderr);
 				int i;
-				printf("wtf\n");
-				scanf("%d\n", i);
+				//printf("wtf\n");
+				//scanf("%d\n", i);
 				throw new Exception("ssl connect");
 			}
 		}
 		
 		@trusted
-		override ptrdiff_t send(const(void)[] buf, SocketFlags flags) {
+		override ptrdiff_t send(scope const(void)[] buf, SocketFlags flags) {
 		//import std.stdio;writeln(cast(string) buf);
 			auto retval = SSL_write(ssl, buf.ptr, cast(uint) buf.length);
 			if(retval == -1) {
 				ERR_print_errors_fp(core.stdc.stdio.stderr);
 				int i;
-				printf("wtf\n");
-				scanf("%d\n", i);
+				//printf("wtf\n");
+				//scanf("%d\n", i);
 				throw new Exception("ssl send");
 			}
 			return retval;
 
 		}
-		override ptrdiff_t send(const(void)[] buf) {
+		override ptrdiff_t send(scope const(void)[] buf) {
 			return send(buf, SocketFlags.NONE);
 		}
 		@trusted
-		override ptrdiff_t receive(void[] buf, SocketFlags flags) {
+		override ptrdiff_t receive(scope void[] buf, SocketFlags flags) {
 			auto retval = SSL_read(ssl, buf.ptr, cast(int)buf.length);
 			if(retval == -1) {
 				ERR_print_errors_fp(core.stdc.stdio.stderr);
 				int i;
-				printf("wtf\n");
-				scanf("%d\n", i);
+				//printf("wtf\n");
+				//scanf("%d\n", i);
 				throw new Exception("ssl send");
 			}
 			return retval;
 		}
-		override ptrdiff_t receive(void[] buf) {
+		override ptrdiff_t receive(scope void[] buf) {
 			return receive(buf, SocketFlags.NONE);
 		}
 
-		this(AddressFamily af, SocketType type = SocketType.STREAM, bool verifyPeer = true) {
+		this(AddressFamily af, SocketType type = SocketType.STREAM, string hostname = null, bool verifyPeer = true) {
 			super(af, type);
-			initSsl(verifyPeer);
+			initSsl(verifyPeer, hostname);
 		}
 
-		this(socket_t sock, AddressFamily af) {
+		override void close() {
+			if(ssl) SSL_shutdown(ssl);
+			super.close();
+		}
+
+		this(socket_t sock, AddressFamily af, string hostname) {
 			super(sock, af);
-			initSsl(true);
+			initSsl(true, hostname);
 		}
 
 		~this() {
 			SSL_free(ssl);
 			SSL_CTX_free(ctx);
+			ssl = null;
 		}
 	}
 }
@@ -1915,3 +2258,954 @@ class FormData {
 	}
 }
 
+private bool bicmp(in ubyte[] item, in char[] search) {
+	if(item.length != search.length) return false;
+
+	foreach(i; 0 .. item.length) {
+		ubyte a = item[i];
+		ubyte b = search[i];
+		if(a >= 'A' && a <= 'Z')
+			a += 32;
+		//if(b >= 'A' && b <= 'Z')
+			//b += 32;
+		if(a != b)
+			return false;
+	}
+
+	return true;
+}
+
+/++
+	WebSocket client, based on the browser api, though also with other api options.
+
+	---
+		auto ws = new WebSocket(URI("ws://...."));
+
+		ws.onmessage = (in char[] msg) {
+			ws.send("a reply");
+		};
+
+		ws.connect();
+
+		WebSocket.eventLoop();
+	---
+
+	Symbol_groups:
+		foundational =
+			Used with all API styles.
+
+		browser_api =
+			API based on the standard in the browser.
+
+		event_loop_integration =
+			Integrating with external event loops is done through static functions. You should
+			call these BEFORE doing anything else with the WebSocket module or class.
+
+			$(PITFALL NOT IMPLEMENTED)
+			---
+				WebSocket.setEventLoopProxy(arsd.simpledisplay.EventLoop.proxy.tupleof);
+				// or something like that. it is not implemented yet.
+			---
+			$(PITFALL NOT IMPLEMENTED)
+
+		blocking_api =
+			The blocking API is best used when you only need basic functionality with a single connection.
+
+			---
+			WebSocketFrame msg;
+			do {
+				// FIXME good demo
+			} while(msg);
+			---
+
+			Or to check for blocks before calling:
+
+			---
+			try_to_process_more:
+			while(ws.isMessageBuffered()) {
+				auto msg = ws.waitForNextMessage();
+				// process msg
+			}
+			if(ws.isDataPending()) {
+				ws.lowLevelReceive();
+				goto try_to_process_more;
+			} else {
+				// nothing ready, you can do other things
+				// or at least sleep a while before trying
+				// to process more.
+				if(ws.readyState == WebSocket.OPEN) {
+					Thread.sleep(1.seconds);
+					goto try_to_process_more;
+				}
+			}
+			---
+			
++/
+class WebSocket {
+	private Uri uri;
+	private string[string] cookies;
+	private string origin;
+
+	private string host;
+	private ushort port;
+	private bool ssl;
+
+	/++
+		wss://echo.websocket.org
+	+/
+	/// Group: foundational
+	this(Uri uri, Config config = Config.init)
+		//in (uri.scheme == "ws" || uri.scheme == "wss")
+		in { assert(uri.scheme == "ws" || uri.scheme == "wss"); } do
+	{
+		this.uri = uri;
+		this.config = config;
+
+		this.receiveBuffer = new ubyte[](config.initialReceiveBufferSize);
+
+		host = uri.host;
+		ssl = uri.scheme == "wss";
+		port = cast(ushort) (uri.port ? uri.port : ssl ? 443 : 80);
+
+		if(ssl) {
+			version(with_openssl)
+				socket = new SslClientSocket(family(uri.unixSocketPath), SocketType.STREAM, host);
+			else
+				throw new Exception("SSL not compiled in");
+		} else
+			socket = new Socket(family(uri.unixSocketPath), SocketType.STREAM);
+
+	}
+
+	/++
+
+	+/
+	/// Group: foundational
+	void connect() {
+		if(uri.unixSocketPath)
+			socket.connect(new UnixAddress(uri.unixSocketPath));
+		else
+			socket.connect(new InternetAddress(host, port)); // FIXME: ipv6 support...
+		// FIXME: websocket handshake could and really should be async too.
+
+		auto uri = this.uri.path.length ? this.uri.path : "/";
+		if(this.uri.query.length) {
+			uri ~= "?";
+			uri ~= this.uri.query;
+		}
+
+		// the headers really shouldn't be bigger than this, at least
+		// the chunks i need to process
+		ubyte[4096] buffer;
+		size_t pos;
+
+		void append(in char[][] items...) {
+			foreach(what; items) {
+				buffer[pos .. pos + what.length] = cast(ubyte[]) what[];
+				pos += what.length;
+			}
+		}
+
+		append("GET ", uri, " HTTP/1.1\r\n");
+		append("Host: ", this.uri.host, "\r\n");
+
+		append("Upgrade: websocket\r\n");
+		append("Connection: Upgrade\r\n");
+		append("Sec-WebSocket-Version: 13\r\n");
+
+		// FIXME: randomize this
+		append("Sec-WebSocket-Key: x3JEHMbDL1EzLkh9GBhXDw==\r\n");
+
+		if(config.protocol.length)
+			append("Sec-WebSocket-Protocol: ", config.protocol, "\r\n");
+		if(config.origin.length)
+			append("Origin: ", origin, "\r\n");
+
+		append("\r\n");
+
+		auto remaining = buffer[0 .. pos];
+		//import std.stdio; writeln(host, " " , port, " ", cast(string) remaining);
+		while(remaining.length) {
+			auto r = socket.send(remaining);
+			if(r < 0)
+				throw new Exception(lastSocketError());
+			if(r == 0)
+				throw new Exception("unexpected connection termination");
+			remaining = remaining[r .. $];
+		}
+
+		// the response shouldn't be especially large at this point, just
+		// headers for the most part. gonna try to get it in the stack buffer.
+		// then copy stuff after headers, if any, to the frame buffer.
+		ubyte[] used;
+
+		void more() {
+			auto r = socket.receive(buffer[used.length .. $]);
+
+			if(r < 0)
+				throw new Exception(lastSocketError());
+			if(r == 0)
+				throw new Exception("unexpected connection termination");
+			//import std.stdio;writef("%s", cast(string) buffer[used.length .. used.length + r]);
+
+			used = buffer[0 .. used.length + r];
+		}
+
+		more();
+
+		import std.algorithm;
+		if(!used.startsWith(cast(ubyte[]) "HTTP/1.1 101"))
+			throw new Exception("didn't get a websocket answer");
+		// skip the status line
+		while(used.length && used[0] != '\n')
+			used = used[1 .. $];
+
+		if(used.length == 0)
+			throw new Exception("wtf");
+
+		if(used.length < 1)
+			more();
+
+		used = used[1 .. $]; // skip the \n
+
+		if(used.length == 0)
+			more();
+
+		// checks on the protocol from ehaders
+		bool isWebsocket;
+		bool isUpgrade;
+		const(ubyte)[] protocol;
+		const(ubyte)[] accept;
+
+		while(used.length) {
+			if(used.length >= 2 && used[0] == '\r' && used[1] == '\n') {
+				used = used[2 .. $];
+				break; // all done
+			}
+			int idxColon;
+			while(idxColon < used.length && used[idxColon] != ':')
+				idxColon++;
+			if(idxColon == used.length)
+				more();
+			auto idxStart = idxColon + 1;
+			while(idxStart < used.length && used[idxStart] == ' ')
+				idxStart++;
+			if(idxStart == used.length)
+				more();
+			auto idxEnd = idxStart;
+			while(idxEnd < used.length && used[idxEnd] != '\r')
+				idxEnd++;
+			if(idxEnd == used.length)
+				more();
+
+			auto headerName = used[0 .. idxColon];
+			auto headerValue = used[idxStart .. idxEnd];
+
+			// move past this header
+			used = used[idxEnd .. $];
+			// and the \r\n
+			if(2 <= used.length)
+				used = used[2 .. $];
+
+			if(headerName.bicmp("upgrade")) {
+				if(headerValue.bicmp("websocket"))
+					isWebsocket = true;
+			} else if(headerName.bicmp("connection")) {
+				if(headerValue.bicmp("upgrade"))
+					isUpgrade = true;
+			} else if(headerName.bicmp("sec-websocket-accept")) {
+				accept = headerValue;
+			} else if(headerName.bicmp("sec-websocket-protocol")) {
+				protocol = headerValue;
+			}
+
+			if(!used.length) {
+				more();
+			}
+		}
+
+
+		if(!isWebsocket)
+			throw new Exception("didn't answer as websocket");
+		if(!isUpgrade)
+			throw new Exception("didn't answer as upgrade");
+
+
+		// FIXME: check protocol if config requested one
+		// FIXME: check accept for the right hash
+
+		receiveBuffer[0 .. used.length] = used[];
+		receiveBufferUsedLength = used.length;
+
+		readyState_ = OPEN;
+
+		if(onopen)
+			onopen();
+
+		registerActiveSocket(this);
+	}
+
+	/++
+		Is data pending on the socket? Also check [isMessageBuffered] to see if there
+		is already a message in memory too.
+
+		If this returns `true`, you can call [lowLevelReceive], then try [isMessageBuffered]
+		again.
+	+/
+	/// Group: blocking_api
+	public bool isDataPending(Duration timeout = 0.seconds) {
+		static SocketSet readSet;
+		if(readSet is null)
+			readSet = new SocketSet();
+
+		version(with_openssl)
+		if(auto s = cast(SslClientSocket) socket) {
+			// select doesn't handle the case with stuff
+			// left in the ssl buffer so i'm checking it separately
+			if(s.dataPending()) {
+				return true;
+			}
+		}
+
+		readSet.add(socket);
+
+		//tryAgain:
+		auto selectGot = Socket.select(readSet, null, null, timeout);
+		if(selectGot == 0) { /* timeout */
+			// timeout
+			return false;
+		} else if(selectGot == -1) { /* interrupted */
+			return false;
+		} else { /* ready */
+			if(readSet.isSet(socket)) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private void llsend(ubyte[] d) {
+		while(d.length) {
+			auto r = socket.send(d);
+			if(r <= 0) throw new Exception("wtf");
+			d = d[r .. $];
+		}
+	}
+
+	private void llclose() {
+		socket.shutdown(SocketShutdown.SEND);
+	}
+
+	/++
+		Waits for more data off the low-level socket and adds it to the pending buffer.
+
+		Returns `true` if the connection is still active.
+	+/
+	/// Group: blocking_api
+	public bool lowLevelReceive() {
+		auto r = socket.receive(receiveBuffer[receiveBufferUsedLength .. $]);
+		if(r == 0)
+			return false;
+		if(r <= 0)
+			throw new Exception("wtf");
+		receiveBufferUsedLength += r;
+		return true;
+	}
+
+	private Socket socket;
+
+	/* copy/paste section { */
+
+	private int readyState_;
+	private ubyte[] receiveBuffer;
+	private size_t receiveBufferUsedLength;
+
+	private Config config;
+
+	enum CONNECTING = 0; /// Socket has been created. The connection is not yet open.
+	enum OPEN = 1; /// The connection is open and ready to communicate.
+	enum CLOSING = 2; /// The connection is in the process of closing.
+	enum CLOSED = 3; /// The connection is closed or couldn't be opened.
+
+	/++
+
+	+/
+	/// Group: foundational
+	static struct Config {
+		/++
+			These control the size of the receive buffer.
+
+			It starts at the initial size, will temporarily
+			balloon up to the maximum size, and will reuse
+			a buffer up to the likely size.
+
+			Anything larger than the maximum size will cause
+			the connection to be aborted and an exception thrown.
+			This is to protect you against a peer trying to
+			exhaust your memory, while keeping the user-level
+			processing simple.
+		+/
+		size_t initialReceiveBufferSize = 4096;
+		size_t likelyReceiveBufferSize = 4096; /// ditto
+		size_t maximumReceiveBufferSize = 10 * 1024 * 1024; /// ditto
+
+		/++
+			Maximum combined size of a message.
+		+/
+		size_t maximumMessageSize = 10 * 1024 * 1024;
+
+		string[string] cookies; /// Cookies to send with the initial request. cookies[name] = value;
+		string origin; /// Origin URL to send with the handshake, if desired.
+		string protocol; /// the protocol header, if desired.
+
+		int pingFrequency = 5000; /// Amount of time (in msecs) of idleness after which to send an automatic ping
+	}
+
+	/++
+		Returns one of [CONNECTING], [OPEN], [CLOSING], or [CLOSED].
+	+/
+	int readyState() {
+		return readyState_;
+	}
+
+	/++
+		Closes the connection, sending a graceful teardown message to the other side.
+	+/
+	/// Group: foundational
+	void close(int code = 0, string reason = null)
+		//in (reason.length < 123)
+		in { assert(reason.length < 123); } do
+	{
+		if(readyState_ != OPEN)
+			return; // it cool, we done
+		WebSocketFrame wss;
+		wss.fin = true;
+		wss.opcode = WebSocketOpcode.close;
+		wss.data = cast(ubyte[]) reason;
+		wss.send(&llsend);
+
+		readyState_ = CLOSING;
+
+		llclose();
+	}
+
+	/++
+		Sends a ping message to the server. This is done automatically by the library if you set a non-zero [Config.pingFrequency], but you can also send extra pings explicitly as well with this function.
+	+/
+	/// Group: foundational
+	void ping() {
+		WebSocketFrame wss;
+		wss.fin = true;
+		wss.opcode = WebSocketOpcode.ping;
+		wss.send(&llsend);
+	}
+
+	// automatically handled....
+	void pong() {
+		WebSocketFrame wss;
+		wss.fin = true;
+		wss.opcode = WebSocketOpcode.pong;
+		wss.send(&llsend);
+	}
+
+	/++
+		Sends a text message through the websocket.
+	+/
+	/// Group: foundational
+	void send(in char[] textData) {
+		WebSocketFrame wss;
+		wss.fin = true;
+		wss.opcode = WebSocketOpcode.text;
+		wss.data = cast(ubyte[]) textData;
+		wss.send(&llsend);
+	}
+
+	/++
+		Sends a binary message through the websocket.
+	+/
+	/// Group: foundational
+	void send(in ubyte[] binaryData) {
+		WebSocketFrame wss;
+		wss.fin = true;
+		wss.opcode = WebSocketOpcode.binary;
+		wss.data = cast(ubyte[]) binaryData;
+		wss.send(&llsend);
+	}
+
+	/++
+		Waits for and returns the next complete message on the socket.
+
+		Note that the onmessage function is still called, right before
+		this returns.
+	+/
+	/// Group: blocking_api
+	public WebSocketFrame waitForNextMessage() {
+		do {
+			auto m = processOnce();
+			if(m.populated)
+				return m;
+		} while(lowLevelReceive());
+
+		return WebSocketFrame.init; // FIXME? maybe.
+	}
+
+	/++
+		Tells if [waitForNextMessage] would block.
+	+/
+	/// Group: blocking_api
+	public bool waitForNextMessageWouldBlock() {
+		checkAgain:
+		if(isMessageBuffered())
+			return false;
+		if(!isDataPending())
+			return true;
+		while(isDataPending())
+			lowLevelReceive();
+		goto checkAgain;
+	}
+
+	/++
+		Is there a message in the buffer already?
+		If `true`, [waitForNextMessage] is guaranteed to return immediately.
+		If `false`, check [isDataPending] as the next step.
+	+/
+	/// Group: blocking_api
+	public bool isMessageBuffered() {
+		ubyte[] d = receiveBuffer[0 .. receiveBufferUsedLength];
+		auto s = d;
+		if(d.length) {
+			auto orig = d;
+			auto m = WebSocketFrame.read(d);
+			// that's how it indicates that it needs more data
+			if(d !is orig)
+				return true;
+		}
+
+		return false;
+	}
+
+	private ubyte continuingType;
+	private ubyte[] continuingData;
+	//private size_t continuingDataLength;
+
+	private WebSocketFrame processOnce() {
+		ubyte[] d = receiveBuffer[0 .. receiveBufferUsedLength];
+		auto s = d;
+		// FIXME: handle continuation frames more efficiently. it should really just reuse the receive buffer.
+		WebSocketFrame m;
+		if(d.length) {
+			auto orig = d;
+			m = WebSocketFrame.read(d);
+			// that's how it indicates that it needs more data
+			if(d is orig)
+				return WebSocketFrame.init;
+			m.unmaskInPlace();
+			switch(m.opcode) {
+				case WebSocketOpcode.continuation:
+					if(continuingData.length + m.data.length > config.maximumMessageSize)
+						throw new Exception("message size exceeded");
+
+					continuingData ~= m.data;
+					if(m.fin) {
+						if(ontextmessage)
+							ontextmessage(cast(char[]) continuingData);
+						if(onbinarymessage)
+							onbinarymessage(continuingData);
+
+						continuingData = null;
+					}
+				break;
+				case WebSocketOpcode.text:
+					if(m.fin) {
+						if(ontextmessage)
+							ontextmessage(m.textData);
+					} else {
+						continuingType = m.opcode;
+						//continuingDataLength = 0;
+						continuingData = null;
+						continuingData ~= m.data;
+					}
+				break;
+				case WebSocketOpcode.binary:
+					if(m.fin) {
+						if(onbinarymessage)
+							onbinarymessage(m.data);
+					} else {
+						continuingType = m.opcode;
+						//continuingDataLength = 0;
+						continuingData = null;
+						continuingData ~= m.data;
+					}
+				break;
+				case WebSocketOpcode.close:
+					readyState_ = CLOSED;
+					if(onclose)
+						onclose();
+
+					unregisterActiveSocket(this);
+				break;
+				case WebSocketOpcode.ping:
+					pong();
+				break;
+				case WebSocketOpcode.pong:
+					// just really references it is still alive, nbd.
+				break;
+				default: // ignore though i could and perhaps should throw too
+			}
+		}
+		receiveBufferUsedLength -= s.length - d.length;
+
+		return m;
+	}
+
+	private void autoprocess() {
+		// FIXME
+		do {
+			processOnce();
+		} while(lowLevelReceive());
+	}
+
+
+	void delegate() onclose; ///
+	void delegate() onerror; ///
+	void delegate(in char[]) ontextmessage; ///
+	void delegate(in ubyte[]) onbinarymessage; ///
+	void delegate() onopen; ///
+
+	/++
+
+	+/
+	/// Group: browser_api
+	void onmessage(void delegate(in char[]) dg) {
+		ontextmessage = dg;
+	}
+
+	/// ditto
+	void onmessage(void delegate(in ubyte[]) dg) {
+		onbinarymessage = dg;
+	}
+
+	/* } end copy/paste */
+
+	/*
+	const int bufferedAmount // amount pending
+	const string extensions
+
+	const string protocol
+	const string url
+	*/
+
+	static {
+		/++
+
+		+/
+		void eventLoop() {
+
+			static SocketSet readSet;
+
+			if(readSet is null)
+				readSet = new SocketSet();
+
+			loopExited = false;
+
+			outermost: while(!loopExited) {
+				readSet.reset();
+
+				bool hadAny;
+				foreach(sock; activeSockets) {
+					readSet.add(sock.socket);
+					hadAny = true;
+				}
+
+				if(!hadAny)
+					return;
+
+				tryAgain:
+				auto selectGot = Socket.select(readSet, null, null, 10.seconds /* timeout */);
+				if(selectGot == 0) { /* timeout */
+					// timeout
+					goto tryAgain;
+				} else if(selectGot == -1) { /* interrupted */
+					goto tryAgain;
+				} else {
+					foreach(sock; activeSockets) {
+						if(readSet.isSet(sock.socket)) {
+							if(!sock.lowLevelReceive()) {
+								sock.readyState_ = CLOSED;
+								unregisterActiveSocket(sock);
+								continue outermost;
+							}
+							while(sock.processOnce().populated) {}
+							selectGot--;
+							if(selectGot <= 0)
+								break;
+						}
+					}
+				}
+			}
+		}
+
+		private bool loopExited;
+		/++
+
+		+/
+		void exitEventLoop() {
+			loopExited = true;
+		}
+
+		WebSocket[] activeSockets;
+		void registerActiveSocket(WebSocket s) {
+			activeSockets ~= s;
+		}
+		void unregisterActiveSocket(WebSocket s) {
+			foreach(i, a; activeSockets)
+				if(s is a) {
+					activeSockets[i] = activeSockets[$-1];
+					activeSockets = activeSockets[0 .. $-1];
+					break;
+				}
+		}
+	}
+}
+
+/* copy/paste from cgi.d */
+public {
+	enum WebSocketOpcode : ubyte {
+		continuation = 0,
+		text = 1,
+		binary = 2,
+		// 3, 4, 5, 6, 7 RESERVED
+		close = 8,
+		ping = 9,
+		pong = 10,
+		// 11,12,13,14,15 RESERVED
+	}
+
+	public struct WebSocketFrame {
+		private bool populated;
+		bool fin;
+		bool rsv1;
+		bool rsv2;
+		bool rsv3;
+		WebSocketOpcode opcode; // 4 bits
+		bool masked;
+		ubyte lengthIndicator; // don't set this when building one to send
+		ulong realLength; // don't use when sending
+		ubyte[4] maskingKey; // don't set this when sending
+		ubyte[] data;
+
+		static WebSocketFrame simpleMessage(WebSocketOpcode opcode, void[] data) {
+			WebSocketFrame msg;
+			msg.fin = true;
+			msg.opcode = opcode;
+			msg.data = cast(ubyte[]) data;
+
+			return msg;
+		}
+
+		private void send(scope void delegate(ubyte[]) llsend) {
+			ubyte[64] headerScratch;
+			int headerScratchPos = 0;
+
+			realLength = data.length;
+
+			{
+				ubyte b1;
+				b1 |= cast(ubyte) opcode;
+				b1 |= rsv3 ? (1 << 4) : 0;
+				b1 |= rsv2 ? (1 << 5) : 0;
+				b1 |= rsv1 ? (1 << 6) : 0;
+				b1 |= fin  ? (1 << 7) : 0;
+
+				headerScratch[0] = b1;
+				headerScratchPos++;
+			}
+
+			{
+				headerScratchPos++; // we'll set header[1] at the end of this
+				auto rlc = realLength;
+				ubyte b2;
+				b2 |= masked ? (1 << 7) : 0;
+
+				assert(headerScratchPos == 2);
+
+				if(realLength > 65535) {
+					// use 64 bit length
+					b2 |= 0x7f;
+
+					// FIXME: double check endinaness
+					foreach(i; 0 .. 8) {
+						headerScratch[2 + 7 - i] = rlc & 0x0ff;
+						rlc >>>= 8;
+					}
+
+					headerScratchPos += 8;
+				} else if(realLength > 125) {
+					// use 16 bit length
+					b2 |= 0x7e;
+
+					// FIXME: double check endinaness
+					foreach(i; 0 .. 2) {
+						headerScratch[2 + 1 - i] = rlc & 0x0ff;
+						rlc >>>= 8;
+					}
+
+					headerScratchPos += 2;
+				} else {
+					// use 7 bit length
+					b2 |= realLength & 0b_0111_1111;
+				}
+
+				headerScratch[1] = b2;
+			}
+
+			//assert(!masked, "masking key not properly implemented");
+			if(masked) {
+				// FIXME: randomize this
+				headerScratch[headerScratchPos .. headerScratchPos + 4] = maskingKey[];
+				headerScratchPos += 4;
+
+				// we'll just mask it in place...
+				int keyIdx = 0;
+				foreach(i; 0 .. data.length) {
+					data[i] = data[i] ^ maskingKey[keyIdx];
+					if(keyIdx == 3)
+						keyIdx = 0;
+					else
+						keyIdx++;
+				}
+			}
+
+			//writeln("SENDING ", headerScratch[0 .. headerScratchPos], data);
+			llsend(headerScratch[0 .. headerScratchPos]);
+			llsend(data);
+		}
+
+		static WebSocketFrame read(ref ubyte[] d) {
+			WebSocketFrame msg;
+
+			auto orig = d;
+
+			WebSocketFrame needsMoreData() {
+				d = orig;
+				return WebSocketFrame.init;
+			}
+
+			if(d.length < 2)
+				return needsMoreData();
+
+			ubyte b = d[0];
+
+			msg.populated = true;
+
+			msg.opcode = cast(WebSocketOpcode) (b & 0x0f);
+			b >>= 4;
+			msg.rsv3 = b & 0x01;
+			b >>= 1;
+			msg.rsv2 = b & 0x01;
+			b >>= 1;
+			msg.rsv1 = b & 0x01;
+			b >>= 1;
+			msg.fin = b & 0x01;
+
+			b = d[1];
+			msg.masked = (b & 0b1000_0000) ? true : false;
+			msg.lengthIndicator = b & 0b0111_1111;
+
+			d = d[2 .. $];
+
+			if(msg.lengthIndicator == 0x7e) {
+				// 16 bit length
+				msg.realLength = 0;
+
+				if(d.length < 2) return needsMoreData();
+
+				foreach(i; 0 .. 2) {
+					msg.realLength |= d[0] << ((1-i) * 8);
+					d = d[1 .. $];
+				}
+			} else if(msg.lengthIndicator == 0x7f) {
+				// 64 bit length
+				msg.realLength = 0;
+
+				if(d.length < 8) return needsMoreData();
+
+				foreach(i; 0 .. 8) {
+					msg.realLength |= d[0] << ((7-i) * 8);
+					d = d[1 .. $];
+				}
+			} else {
+				// 7 bit length
+				msg.realLength = msg.lengthIndicator;
+			}
+
+			if(msg.masked) {
+
+				if(d.length < 4) return needsMoreData();
+
+				msg.maskingKey = d[0 .. 4];
+				d = d[4 .. $];
+			}
+
+			if(msg.realLength > d.length) {
+				return needsMoreData();
+			}
+
+			msg.data = d[0 .. cast(size_t) msg.realLength];
+			d = d[cast(size_t) msg.realLength .. $];
+
+			return msg;
+		}
+
+		void unmaskInPlace() {
+			if(this.masked) {
+				int keyIdx = 0;
+				foreach(i; 0 .. this.data.length) {
+					this.data[i] = this.data[i] ^ this.maskingKey[keyIdx];
+					if(keyIdx == 3)
+						keyIdx = 0;
+					else
+						keyIdx++;
+				}
+			}
+		}
+
+		char[] textData() {
+			return cast(char[]) data;
+		}
+	}
+}
+
+/+
+	so the url params are arguments. it knows the request
+	internally. other params are properties on the req
+
+	names may have different paths... those will just add ForSomething i think.
+
+	auto req = api.listMergeRequests
+	req.page = 10;
+
+	or
+		req.page(1)
+		.bar("foo")
+
+	req.execute();
+
+
+	everything in the response is nullable access through the
+	dynamic object, just with property getters there. need to make
+	it static generated tho
+
+	other messages may be: isPresent and getDynamic
+
+
+	AND/OR what about doing it like the rails objects
+
+	BroadcastMessage.get(4)
+	// various properties
+
+	// it lists what you updated
+
+	BroadcastMessage.foo().bar().put(5)
++/
