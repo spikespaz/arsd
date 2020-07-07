@@ -278,6 +278,10 @@ abstract class ComboboxBase : Widget {
         return options;
     }
 
+	int getSelection() {
+		return selection;
+	}
+
     string currentText() {
         if (selection >= 0 && selection + 1 <= options.length)
             return options[selection];
